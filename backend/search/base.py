@@ -8,7 +8,12 @@ class ReverseImageSearcher(ABC):
     """Abstract interface for all reverse image search engines."""
 
     @abstractmethod
-    def search(self, image_bytes: bytes, filename: str = "query.jpg") -> List[Dict[str, Any]]:
+    def search(
+        self,
+        image_bytes: bytes,
+        filename: str = "query.jpg",
+        search_query: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Execute genuine reverse image search.
         Returns a list of raw search results containing candidate URLs, titles, snippets, and image sources.

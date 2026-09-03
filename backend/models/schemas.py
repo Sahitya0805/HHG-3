@@ -15,6 +15,7 @@ class FaceDetectionResponse(BaseModel):
     detection_method: Optional[str] = None
     embedding_generated: bool = False
     embedding_dimensions: int = 0
+    embedding_model: Optional[str] = None
     embedding: List[float] = []
     sample_vector: List[float] = []
     primary_crop_b64: Optional[str] = None
@@ -43,6 +44,9 @@ class CandidateItem(BaseModel):
     match_label: str
     is_match: bool
     color: str
+    candidate_faces_found: int = 0
+    candidate_detection_method: Optional[str] = None
+    match_evidence: Optional[str] = None
     discovered_at: str
 
 

@@ -114,6 +114,7 @@ async def process_face(image: UploadFile = File(...)):
         detection_method=det_result.get("detection_method"),
         embedding_generated=True,
         embedding_dimensions=emb_result["embedding_dimensions"],
+        embedding_model=emb_result.get("model"),
         embedding=emb_result["embedding"],
         sample_vector=emb_result["sample_vector"],
         primary_crop_b64=det_result["primary_crop_b64"],
@@ -154,8 +155,10 @@ async def search_reverse_image(req: SearchRequest):
         return SearchResponse(
             success=False,
             provider_name=res.get("provider_name", "SearchOrchestrator"),
-            total_candidates=0,
-            candidates=[],
+            total_candidates=res.get("total_candidates", 0),
+            candidates=res.get("candidates", []),
+            best_match=res.get("best_match"),
+            metadata=res.get("metadata"),
             error=res.get("error", "Search failed."),
         )
 
@@ -256,7 +259,7 @@ async def run_full_pipeline(image: UploadFile = File(...)):
         input_crop_b64=det_res["primary_crop_b64"],
     )
     if not search_res.get("success"):
-        raise HTTPException(status_code=500, detail="Search failed to find candidates.")
+        raise HTTPException(status_code=502, detail=search_res.get("error", "Search failed to find candidates."))
 
     # 4. Canonical Metadata & Cryptographic Fingerprint
     metadata = search_res["metadata"]
@@ -276,6 +279,7 @@ async def run_full_pipeline(image: UploadFile = File(...)):
             "confidence_percent": det_res.get("confidence_percent"),
             "detection_method": det_res.get("detection_method"),
             "embedding_dimensions": emb_res["embedding_dimensions"],
+            "embedding_model": emb_res.get("model"),
             "primary_crop_b64": det_res["primary_crop_b64"],
             "annotated_image_b64": det_res["annotated_image_b64"],
             "sample_vector": emb_res["sample_vector"],

@@ -19,7 +19,7 @@ from backend.face.detector import FaceDetector
 from backend.face.encoder import FaceEncoder
 from backend.search.reverse_search import ReverseSearchOrchestrator
 from backend.hashing.fingerprint import FingerprintEngine
-from backend.blockchain.verifier import BlockchainVerifier
+from backend.blockchain.verifier import BlockchainConfigurationError, BlockchainVerifier
 
 
 def print_banner():
@@ -30,7 +30,7 @@ def print_banner():
     """)
 
 
-def run_demo(image_path: str):
+def run_demo(image_path: str, search_query: str = None):
     print_banner()
 
     if not os.path.exists(image_path):
@@ -62,6 +62,7 @@ def run_demo(image_path: str):
 
     emb_res = encoder.generate_embedding(det_res["primary_face_crop"])
     print(f" [✓] 512-dimensional face embedding generated.")
+    print(f" [✓] Embedding model: {emb_res.get('model')}")
     print(f" [✓] Embedding vector sample (first 6 dims): {emb_res['embedding'][:6]}")
     print(f" [✓] Vector L2 Norm: {emb_res['norm']}")
 
@@ -72,9 +73,16 @@ def run_demo(image_path: str):
     print(f" [*] Querying search provider: {searcher.provider.__class__.__name__}...")
     time.sleep(0.5)
 
-    search_res = searcher.search_and_match(image_bytes, emb_res["embedding"])
+    search_res = searcher.search_and_match(
+        image_bytes=image_bytes,
+        input_embedding=emb_res["embedding"],
+        input_crop_b64=det_res["primary_crop_b64"],
+        search_query=search_query,
+    )
     if not search_res.get("success"):
         print(f"[x] Reverse search failed: {search_res.get('error')}")
+        if not os.getenv("SERPAPI_API_KEY"):
+            print("    Add SERPAPI_API_KEY to .env before running the live demo.")
         sys.exit(1)
 
     print(f" [✓] Reverse image search completed! Candidates discovered: {search_res['total_candidates']}")
@@ -85,6 +93,7 @@ def run_demo(image_path: str):
     print(f"\n [*] STRONGEST MATCH SELECTED:")
     print(f"     Platform:   {best['source']}")
     print(f"     URL:        {best['url']}")
+    print(f"     Image URL:  {best['image_url']}")
     print(f"     Similarity: {best['similarity_percent']}% ({best['match_label']})")
     print(f"     Snippet:    {best['snippet']}")
 
@@ -104,7 +113,14 @@ def run_demo(image_path: str):
     print("STEP 4: BLOCKCHAIN UPLOAD & TRANSACTION RECORDING")
     print("=" * 50)
     print(f" [*] Connecting to {verifier.network_info['mode']}...")
-    bc_res = verifier.store_hash(fingerprint["hash"])
+    if verifier.network_info.get("error"):
+        print(f" [!] Blockchain configuration notice: {verifier.network_info['error']}")
+    try:
+        bc_res = verifier.store_hash(fingerprint["hash"])
+    except BlockchainConfigurationError as exc:
+        print(f"[x] Blockchain setup failed: {exc}")
+        print("    Start Anvil, deploy the contract, and set CONTRACT_ADDRESS in .env.")
+        sys.exit(1)
 
     print(f" [✓] Status: Transaction Confirmed on Blockchain!")
     print(f"     Transaction Hash: {bc_res['transaction_hash']}")
@@ -156,5 +172,10 @@ if __name__ == "__main__":
         default="samples/demo_face.jpg",
         help="Path to face image (default: samples/demo_face.jpg)",
     )
+    parser.add_argument(
+        "--query",
+        default=None,
+        help="Optional Lens text refinement, e.g. a public name or handle.",
+    )
     args = parser.parse_args()
-    run_demo(args.image)
+    run_demo(args.image, search_query=args.query)

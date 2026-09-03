@@ -22,6 +22,10 @@ echo "[*] Generating test sample face..."
 .venv/bin/python scripts/create_sample.py
 
 echo "=== Setup complete! ==="
+echo "Before the live demo:"
+echo "  1. cp .env.example .env and set SERPAPI_API_KEY"
+echo "  2. start Anvil: anvil --host 127.0.0.1 --port 8545"
+echo "  3. deploy contract: .venv/bin/python scripts/deploy_contract.py"
 echo "Run backend:  .venv/bin/uvicorn backend.main:app --reload --port 8000"
 echo "Run frontend: cd frontend && npm run dev"
 echo "Run CLI demo: .venv/bin/python scripts/demo.py"

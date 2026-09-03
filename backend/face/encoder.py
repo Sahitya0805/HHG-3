@@ -6,18 +6,61 @@ from typing import List, Dict, Any
 
 
 class FaceEncoder:
-    """Generates normalized 512-dimensional face embeddings."""
+    """Generates normalized 512-dimensional face embeddings.
+
+    InsightFace/ArcFace is preferred when installed. The OpenCV feature encoder is
+    retained as a deterministic fallback for local tests and constrained demos.
+    """
 
     def __init__(self, embedding_dim: int = 512):
         self.embedding_dim = embedding_dim
+        self.model_name = "opencv-structural-fallback"
+        self._insightface = None
+
+        try:
+            from insightface.app import FaceAnalysis
+
+            app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
+            app.prepare(ctx_id=0, det_size=(640, 640))
+            self._insightface = app
+            self.model_name = "insightface-arcface-buffalo_l"
+        except Exception:
+            self._insightface = None
 
     def generate_embedding(self, face_crop_bgr: np.ndarray) -> Dict[str, Any]:
         """
         Extract normalized 512-dim facial representation from cropped face image.
-        Uses multi-region spatial histogram & frequency transform for robust representation.
+        Uses ArcFace when available; otherwise uses multi-region spatial histogram
+        and frequency transform features for a reproducible fallback.
         """
         if face_crop_bgr is None or face_crop_bgr.size == 0:
             raise ValueError("Invalid face crop provided for embedding.")
+
+        if self._insightface is not None:
+            rgb = cv2.cvtColor(face_crop_bgr, cv2.COLOR_BGR2RGB)
+            faces = self._insightface.get(rgb)
+            if faces:
+                face = max(
+                    faces,
+                    key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]),
+                )
+                embedding = np.array(face.embedding, dtype=np.float32)
+                norm = np.linalg.norm(embedding)
+                if norm > 0:
+                    embedding = embedding / norm
+
+                if len(embedding) != self.embedding_dim:
+                    embedding = np.resize(embedding, self.embedding_dim)
+
+                embedding_list = [float(round(val, 6)) for val in embedding]
+                return {
+                    "embedding_generated": True,
+                    "embedding_dimensions": len(embedding_list),
+                    "norm": float(round(np.linalg.norm(embedding), 4)),
+                    "embedding": embedding_list,
+                    "sample_vector": embedding_list[:8],
+                    "model": self.model_name,
+                }
 
         # Standardize face dimensions to 160x160
         target_size = (160, 160)
@@ -73,4 +116,5 @@ class FaceEncoder:
             "norm": float(round(np.linalg.norm(normalized_embedding), 4)),
             "embedding": embedding_list,
             "sample_vector": embedding_list[:8],  # Snippet for display
+            "model": self.model_name,
         }

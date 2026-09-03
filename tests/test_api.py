@@ -1,10 +1,80 @@
 """Integration tests for all FastAPI REST endpoints."""
 
 import os
+from pathlib import Path
 from fastapi.testclient import TestClient
+from backend import main
 from backend.main import app
 
 client = TestClient(app)
+
+
+class FixtureSearcher:
+    def search(self, image_bytes: bytes, filename: str = "query.jpg", search_query=None):
+        return [
+            {
+                "url": "https://instagram.com/p/public-event-99",
+                "title": "Hackathon Demo Post",
+                "source": "Instagram",
+                "image_url": "https://example.com/demo_face.jpg",
+                "snippet": "Testing blockchain immutability",
+            }
+        ]
+
+
+class FakeBlockchainVerifier:
+    network_info = {
+        "mode": "local_anvil_evm",
+        "chain_id": 31337,
+        "contract_address": "0x0000000000000000000000000000000000000001",
+        "wallet_address": "0x0000000000000000000000000000000000000002",
+        "connected": True,
+        "error": None,
+    }
+
+    def __init__(self):
+        self.records = {}
+
+    def store_hash(self, hash_str):
+        normalized = "0x" + hash_str.lower().removeprefix("0x")
+        self.records[normalized] = True
+        return {
+            "success": True,
+            "transaction_hash": "0x" + "1" * 64,
+            "block_number": 1,
+            "gas_used": 47218,
+            "submitter": self.network_info["wallet_address"],
+            "stored_hash": normalized,
+            "timestamp": 1,
+            "mode": "local_anvil_evm",
+            "contract_address": self.network_info["contract_address"],
+        }
+
+    def verify_hash(self, hash_str):
+        normalized = "0x" + hash_str.lower().removeprefix("0x")
+        return {
+            "verified": normalized in self.records,
+            "on_chain_hash": normalized if normalized in self.records else None,
+            "timestamp": 1 if normalized in self.records else None,
+            "submitter": self.network_info["wallet_address"] if normalized in self.records else None,
+            "transaction_hash": "0x" + "1" * 64 if normalized in self.records else None,
+            "block_number": 1 if normalized in self.records else None,
+            "mode": "local_anvil_evm",
+            "contract_address": self.network_info["contract_address"],
+        }
+
+
+def _sample_bytes():
+    return Path("samples/demo_face.jpg").read_bytes()
+
+
+def _patch_search(monkeypatch):
+    main.search_orchestrator.provider = FixtureSearcher()
+    monkeypatch.setattr(
+        main.search_orchestrator.parser,
+        "_download_image_bytes",
+        lambda image_url: _sample_bytes(),
+    )
 
 
 def test_api_health():
@@ -32,9 +102,16 @@ def test_api_face_detection():
     assert len(data["embedding"]) == 512
 
 
-def test_api_search_and_hash():
+def test_api_search_and_hash(monkeypatch):
+    _patch_search(monkeypatch)
+    main.blockchain_verifier = FakeBlockchainVerifier()
+
     # 1. Search with dummy embedding
-    emb = [0.05] * 512
+    detector = main.detector
+    encoder = main.encoder
+    img = detector.load_image(_sample_bytes())
+    face = detector.detect_faces(img)
+    emb = encoder.generate_embedding(face["primary_face_crop"])["embedding"]
     search_resp = client.post("/api/search", json={"embedding": emb})
     assert search_resp.status_code == 200
     sdata = search_resp.json()
@@ -86,7 +163,10 @@ def test_api_search_and_hash():
     assert tdata["status"] == "TAMPER_DETECTED"
 
 
-def test_api_end_to_end_pipeline():
+def test_api_end_to_end_pipeline(monkeypatch):
+    _patch_search(monkeypatch)
+    main.blockchain_verifier = FakeBlockchainVerifier()
+
     sample_path = "samples/demo_face.jpg"
     with open(sample_path, "rb") as f:
         response = client.post("/api/pipeline", files={"image": ("demo.jpg", f, "image/jpeg")})
