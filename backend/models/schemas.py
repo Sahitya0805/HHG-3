@@ -10,6 +10,7 @@ class FaceDetectionResponse(BaseModel):
     faces_found: int
     boxes: List[List[int]] = []
     primary_box: Optional[List[int]] = None
+    primary_landmarks: List[List[int]] = []
     confidence: Optional[float] = None
     confidence_percent: Optional[float] = None
     detection_method: Optional[str] = None
@@ -26,9 +27,15 @@ class FaceDetectionResponse(BaseModel):
 
 class SearchRequest(BaseModel):
     embedding: List[float]
+    embedding_model: Optional[str] = None
     image_b64: Optional[str] = None
     face_crop_b64: Optional[str] = None
     search_query: Optional[str] = None
+    search_hint: Optional[str] = None
+    include_videos: bool = True
+    max_sources: int = Field(default=8, ge=1, le=12)
+    max_candidates_per_source: int = Field(default=8, ge=1, le=12)
+    strict_face_match: bool = True
 
 
 class CandidateItem(BaseModel):
@@ -48,6 +55,8 @@ class CandidateItem(BaseModel):
     candidate_faces_found: int = 0
     candidate_detection_method: Optional[str] = None
     match_evidence: Optional[str] = None
+    embedding_model: Optional[str] = None
+    provider: Optional[str] = None
     discovered_at: str
 
 
@@ -56,8 +65,12 @@ class SearchResponse(BaseModel):
     provider_name: str
     total_candidates: int
     candidates: List[CandidateItem] = []
+    provider_results: List[Dict[str, Any]] = []
+    verified_candidates: List[CandidateItem] = []
+    rejected_candidates: List[Dict[str, Any]] = []
     best_match: Optional[CandidateItem] = None
     metadata: Optional[Dict[str, Any]] = None
+    coverage_note: Optional[str] = None
     error: Optional[str] = None
 
 

@@ -2,7 +2,8 @@
 
 import os
 import base64
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query
+from typing import Optional
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -63,8 +64,13 @@ def health_check():
         "version": "1.0.0",
         "blockchain": blockchain_verifier.network_info,
         "search_provider": search_orchestrator.provider.__class__.__name__,
+        "face_encoder": {
+            "model": encoder.model_name,
+            "arcface_available": encoder.is_arcface_model(),
+            "arcface_error": encoder.arcface_error,
+        },
         "search": {
-            "provider": search_orchestrator.provider.__class__.__name__,
+            "provider": "FaceFirstPublicSearch",
             "configured": search_configured,
             "error": None if search_configured else "SERPAPI_API_KEY is missing.",
         },
@@ -106,8 +112,10 @@ async def process_face(image: UploadFile = File(...)):
         )
 
     # Generate 512-dim embedding from primary aligned face crop
-    face_crop = det_result["primary_face_crop"]
-    emb_result = encoder.generate_embedding(face_crop)
+    emb_result = encoder.generate_embedding_from_landmarks(
+        img_bgr,
+        det_result.get("primary_landmarks"),
+    )
 
     return FaceDetectionResponse(
         success=True,
@@ -115,6 +123,7 @@ async def process_face(image: UploadFile = File(...)):
         faces_found=det_result["faces_found"],
         boxes=det_result["boxes"],
         primary_box=det_result["primary_box"],
+        primary_landmarks=det_result.get("primary_landmarks", []),
         confidence=det_result.get("confidence"),
         confidence_percent=det_result.get("confidence_percent"),
         detection_method=det_result.get("detection_method"),
@@ -155,24 +164,39 @@ async def search_reverse_image(req: SearchRequest):
         input_embedding=req.embedding,
         input_crop_b64=req.face_crop_b64 or req.image_b64,
         search_query=req.search_query,
+        search_hint=req.search_hint,
+        include_videos=req.include_videos,
+        max_sources=req.max_sources,
+        max_candidates_per_source=req.max_candidates_per_source,
+        strict_face_match=req.strict_face_match,
+        input_embedding_model=req.embedding_model,
     )
 
     if not res.get("success"):
         error = res.get("error", "Search failed.")
         if "SERPAPI_API_KEY" in error:
             error = "Live web search is not configured. Add SERPAPI_API_KEY to .env and restart the backend."
+        elif "ArcFace strict matching" in error:
+            error = (
+                "ArcFace face matching is not ready yet. Install insightface/onnxruntime, "
+                "let the model download finish, then restart the backend."
+            )
         elif "hasn't returned any results" in error or "No search results" in error:
             error = (
-                "Google Lens did not find public matches for this image. "
-                "Try a full original image that is already visible on the public web."
+                "No public match was found. This searches public indexed pages only; "
+                "try the original public image and add a name or handle in the hint box."
             )
         return SearchResponse(
             success=False,
             provider_name=res.get("provider_name", "SearchOrchestrator"),
             total_candidates=res.get("total_candidates", 0),
             candidates=res.get("candidates", []),
+            provider_results=res.get("provider_results", []),
+            verified_candidates=res.get("verified_candidates", []),
+            rejected_candidates=res.get("rejected_candidates", []),
             best_match=res.get("best_match"),
             metadata=res.get("metadata"),
+            coverage_note=res.get("coverage_note"),
             error=error,
         )
 
@@ -181,8 +205,12 @@ async def search_reverse_image(req: SearchRequest):
         provider_name=res["provider_name"],
         total_candidates=res["total_candidates"],
         candidates=res["candidates"],
+        provider_results=res.get("provider_results", []),
+        verified_candidates=res.get("verified_candidates", res["candidates"]),
+        rejected_candidates=res.get("rejected_candidates", []),
         best_match=res["best_match"],
         metadata=res["metadata"],
+        coverage_note=res.get("coverage_note"),
     )
 
 
@@ -248,7 +276,14 @@ def test_tampering(req: TamperTestRequest):
 
 
 @app.post("/api/pipeline", response_model=PipelineRunResponse)
-async def run_full_pipeline(image: UploadFile = File(...)):
+async def run_full_pipeline(
+    image: UploadFile = File(...),
+    search_hint: Optional[str] = Form(default=None),
+    include_videos: bool = Form(default=True),
+    max_sources: int = Form(default=8),
+    max_candidates_per_source: int = Form(default=8),
+    strict_face_match: bool = Form(default=True),
+):
     """
     End-to-end Automated Pipeline execution.
     """
@@ -261,16 +296,25 @@ async def run_full_pipeline(image: UploadFile = File(...)):
     # 1. Face Detection
     det_res = detector.detect_faces(img_bgr)
     if not det_res.get("face_detected"):
-        raise HTTPException(status_code=400, detail="❌ No face detected. Please upload an image containing a clear human face.")
+        raise HTTPException(status_code=400, detail="No face detected. Please upload an image containing a clear human face.")
 
     # 2. Embedding Generation
-    emb_res = encoder.generate_embedding(det_res["primary_face_crop"])
+    emb_res = encoder.generate_embedding_from_landmarks(
+        img_bgr,
+        det_res.get("primary_landmarks"),
+    )
 
     # 3. Reverse Web Search & Candidate Match
     search_res = search_orchestrator.search_and_match(
         image_bytes=contents,
         input_embedding=emb_res["embedding"],
         input_crop_b64=det_res["primary_crop_b64"],
+        search_hint=search_hint,
+        include_videos=include_videos,
+        max_sources=max_sources,
+        max_candidates_per_source=max_candidates_per_source,
+        strict_face_match=strict_face_match,
+        input_embedding_model=emb_res.get("model"),
     )
     if not search_res.get("success"):
         raise HTTPException(status_code=502, detail=search_res.get("error", "Search failed to find candidates."))
@@ -290,6 +334,7 @@ async def run_full_pipeline(image: UploadFile = File(...)):
         face={
             "faces_found": det_res["faces_found"],
             "primary_box": det_res["primary_box"],
+            "primary_landmarks": det_res.get("primary_landmarks", []),
             "confidence_percent": det_res.get("confidence_percent"),
             "detection_method": det_res.get("detection_method"),
             "embedding_dimensions": emb_res["embedding_dimensions"],
@@ -300,8 +345,12 @@ async def run_full_pipeline(image: UploadFile = File(...)):
         },
         search={
             "provider": search_res["provider_name"],
+            "provider_results": search_res.get("provider_results", []),
             "candidates": search_res["candidates"],
+            "verified_candidates": search_res.get("verified_candidates", search_res["candidates"]),
+            "rejected_candidates": search_res.get("rejected_candidates", []),
             "best_match": search_res["best_match"],
+            "coverage_note": search_res.get("coverage_note"),
         },
         metadata=metadata,
         fingerprint=fingerprint,

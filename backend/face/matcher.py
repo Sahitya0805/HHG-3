@@ -9,6 +9,8 @@ class FaceMatcher:
 
     STRONG_MATCH_THRESHOLD = 0.90
     POSSIBLE_MATCH_THRESHOLD = 0.80
+    ARCFACE_STRONG_MATCH_THRESHOLD = 0.45
+    ARCFACE_POSSIBLE_MATCH_THRESHOLD = 0.32
 
     @staticmethod
     def cosine_similarity(embedding_a: List[float], embedding_b: List[float]) -> float:
@@ -32,19 +34,26 @@ class FaceMatcher:
         return round(similarity, 4)
 
     @classmethod
-    def evaluate_match(cls, similarity: float) -> Dict[str, Any]:
+    def evaluate_match(cls, similarity: float, model_family: str = "fallback") -> Dict[str, Any]:
         """
         Classifies similarity score against demonstration thresholds:
         >= 0.90 -> Strong Match
         0.80 - 0.89 -> Possible Match
         < 0.80 -> Reject
         """
-        if similarity >= cls.STRONG_MATCH_THRESHOLD:
+        if model_family == "arcface":
+            strong_threshold = cls.ARCFACE_STRONG_MATCH_THRESHOLD
+            possible_threshold = cls.ARCFACE_POSSIBLE_MATCH_THRESHOLD
+        else:
+            strong_threshold = cls.STRONG_MATCH_THRESHOLD
+            possible_threshold = cls.POSSIBLE_MATCH_THRESHOLD
+
+        if similarity >= strong_threshold:
             category = "STRONG_MATCH"
             label = "Strong Match"
             is_match = True
             color = "green"
-        elif similarity >= cls.POSSIBLE_MATCH_THRESHOLD:
+        elif similarity >= possible_threshold:
             category = "POSSIBLE_MATCH"
             label = "Possible Match"
             is_match = True
@@ -63,7 +72,7 @@ class FaceMatcher:
             "is_match": is_match,
             "color": color,
             "thresholds": {
-                "strong_match": cls.STRONG_MATCH_THRESHOLD,
-                "possible_match": cls.POSSIBLE_MATCH_THRESHOLD,
+                "strong_match": strong_threshold,
+                "possible_match": possible_threshold,
             },
         }

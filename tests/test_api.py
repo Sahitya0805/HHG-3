@@ -111,13 +111,18 @@ def test_api_search_and_hash(monkeypatch):
     encoder = main.encoder
     img = detector.load_image(_sample_bytes())
     face = detector.detect_faces(img)
-    emb = encoder.generate_embedding(face["primary_face_crop"])["embedding"]
+    emb_res = encoder.generate_embedding_from_landmarks(
+        img,
+        face.get("primary_landmarks"),
+    )
     search_resp = client.post(
         "/api/search",
         json={
-            "embedding": emb,
+            "embedding": emb_res["embedding"],
+            "embedding_model": emb_res["model"],
             "image_b64": "data:image/jpeg;base64,full-image",
             "face_crop_b64": face["primary_crop_b64"],
+            "strict_face_match": False,
         },
     )
     assert search_resp.status_code == 200
@@ -176,7 +181,11 @@ def test_api_end_to_end_pipeline(monkeypatch):
 
     sample_path = "samples/demo_face.jpg"
     with open(sample_path, "rb") as f:
-        response = client.post("/api/pipeline", files={"image": ("demo.jpg", f, "image/jpeg")})
+        response = client.post(
+            "/api/pipeline",
+            files={"image": ("demo.jpg", f, "image/jpeg")},
+            data={"strict_face_match": "false"},
+        )
 
     assert response.status_code == 200
     data = response.json()
@@ -188,3 +197,5 @@ def test_api_end_to_end_pipeline(monkeypatch):
     assert "blockchain" in data
     assert "verification" in data
     assert data["verification"]["verified"] is True
+    assert "provider_results" in data["search"]
+    assert "verified_candidates" in data["search"]

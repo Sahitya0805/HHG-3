@@ -30,7 +30,7 @@ def print_banner():
     """)
 
 
-def run_demo(image_path: str, search_query: str = None):
+def run_demo(image_path: str, search_query: str = None, strict_face_match: bool = True):
     print_banner()
 
     if not os.path.exists(image_path):
@@ -60,7 +60,10 @@ def run_demo(image_path: str, search_query: str = None):
     print(f" [✓] Face detected successfully! Faces found: {det_res['faces_found']}")
     print(f" [✓] Primary face bounding box (x,y,w,h): {det_res['primary_box']}")
 
-    emb_res = encoder.generate_embedding(det_res["primary_face_crop"])
+    emb_res = encoder.generate_embedding_from_landmarks(
+        img_bgr,
+        det_res.get("primary_landmarks"),
+    )
     print(f" [✓] 512-dimensional face embedding generated.")
     print(f" [✓] Embedding model: {emb_res.get('model')}")
     print(f" [✓] Embedding vector sample (first 6 dims): {emb_res['embedding'][:6]}")
@@ -68,30 +71,46 @@ def run_demo(image_path: str, search_query: str = None):
 
     # --- STEP 2: Genuine Reverse Search ---
     print("\n" + "=" * 50)
-    print("STEP 2: GENUINE REVERSE IMAGE SEARCH & MATCHING")
+    print("STEP 2: FACE-FIRST PUBLIC WEB/PROFILE/VIDEO SEARCH")
     print("=" * 50)
-    print(f" [*] Querying search provider: {searcher.provider.__class__.__name__}...")
+    print(" [*] Searching Google Lens full image, Google Lens face crop, and hinted public profile/video pages...")
     time.sleep(0.5)
 
     search_res = searcher.search_and_match(
         image_bytes=image_bytes,
         input_embedding=emb_res["embedding"],
         input_crop_b64=det_res["primary_crop_b64"],
-        search_query=search_query,
+        search_hint=search_query,
+        include_videos=True,
+        strict_face_match=strict_face_match,
+        input_embedding_model=emb_res.get("model"),
     )
     if not search_res.get("success"):
-        print(f"[x] Reverse search failed: {search_res.get('error')}")
+        print(f"[x] Public face search failed: {search_res.get('error')}")
+        for provider in search_res.get("provider_results", []):
+            status = provider.get("error") or f"{provider.get('raw_count', 0)} raw results"
+            print(f"    - {provider.get('provider')}: {status}")
+        if search_res.get("rejected_candidates"):
+            print("    Rejected evidence samples:")
+            for item in search_res["rejected_candidates"][:5]:
+                print(f"    - {item.get('reason')}: {item.get('url') or item.get('title')}")
         if not os.getenv("SERPAPI_API_KEY"):
             print("    Add SERPAPI_API_KEY to .env before running the live demo.")
         sys.exit(1)
 
-    print(f" [✓] Reverse image search completed! Candidates discovered: {search_res['total_candidates']}")
+    print(f" [✓] Discovery completed. Raw candidates discovered: {search_res['total_candidates']}")
+    for provider in search_res.get("provider_results", []):
+        status = provider.get("error") or f"{provider.get('raw_count', 0)} raw results"
+        print(f"     Provider: {provider.get('provider')} -> {status}")
+    print(f" [✓] Verified face matches: {len(search_res.get('verified_candidates', []))}")
+    print(f" [*] Rejected candidate checks: {len(search_res.get('rejected_candidates', []))}")
     for cand in search_res["candidates"][:3]:
         print(f"     #{cand['rank']} {cand['source']}: {cand['title'][:40]}... (Sim: {cand['similarity_percent']}%) -> {cand['match_label']}")
 
     best = search_res["best_match"]
     print(f"\n [*] STRONGEST MATCH SELECTED:")
     print(f"     Platform:   {best['source']}")
+    print(f"     Provider:   {best.get('provider')}")
     print(f"     URL:        {best['url']}")
     print(f"     Image URL:  {best['image_url']}")
     print(f"     Similarity: {best['similarity_percent']}% ({best['match_label']})")
@@ -175,7 +194,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--query",
         default=None,
-        help="Optional Lens text refinement, e.g. a public name or handle.",
+        help="Optional public name, handle, or context used for profile/video web search.",
+    )
+    parser.add_argument(
+        "--no-strict-arcface",
+        action="store_true",
+        help="Allow OpenCV fallback embeddings for local debugging only.",
     )
     args = parser.parse_args()
-    run_demo(args.image, search_query=args.query)
+    run_demo(args.image, search_query=args.query, strict_face_match=not args.no_strict_arcface)

@@ -11,6 +11,7 @@ fi
 
 echo "[*] Installing Python backend dependencies..."
 .venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r requirements-arcface.txt
 
 # 2. Setup Node frontend
 if [ -d "frontend" ]; then

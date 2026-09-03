@@ -28,11 +28,20 @@ def test_face_detector_and_encoder():
     assert res["primary_crop_b64"].startswith("data:image/jpeg;base64,")
 
     # Embedding generation
-    emb_res = encoder.generate_embedding(res["primary_face_crop"])
+    emb_res = encoder.generate_embedding_from_landmarks(
+        img_bgr,
+        res.get("primary_landmarks"),
+    )
     assert emb_res["embedding_generated"] is True
     assert emb_res["embedding_dimensions"] == 512
     assert len(emb_res["embedding"]) == 512
     assert pytest.approx(emb_res["norm"], 0.01) == 1.0
+
+
+def test_arcface_encoder_status_reports_cleanly():
+    encoder = FaceEncoder(embedding_dim=512)
+    assert isinstance(encoder.model_name, str)
+    assert isinstance(encoder.is_arcface_model(), bool)
 
 
 def test_face_no_detection():

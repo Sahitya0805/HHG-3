@@ -30,7 +30,7 @@ const STEPS = [
 
 const LOADING_TEXT = {
   face: 'Detecting the face and building the embedding',
-  search: 'Sending the image to Google Lens and checking candidate faces',
+  search: 'Searching public web/profile/video sources',
   hash: 'Canonicalizing the discovered post metadata',
   chain: 'Writing the metadata hash to the local EVM contract',
   verify: 'Reading the contract record and comparing hashes',
@@ -155,8 +155,10 @@ export default function App() {
         fullImageB64,
         searchQuery.trim() || null,
         face.primary_crop_b64,
+        face.embedding_model,
       );
       if (!search.success) {
+        setSearchData(search);
         throw new Error(search.error || 'No matching public result passed candidate verification.');
       }
       setSearchData(search);
@@ -248,9 +250,18 @@ export default function App() {
         </div>
 
         {loadingMessage && (
-          <div className="mb-5 flex items-center gap-3 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+          <div className="mb-5 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+            <div className="flex items-center gap-3">
             <Loader2 className="h-4 w-4 animate-spin" />
             <span>{loadingMessage}</span>
+            </div>
+            {activeStep === 'search' && (
+              <div className="mt-2 grid gap-1 pl-7 text-xs text-blue-800 sm:grid-cols-3">
+                <span>Google Lens full image + face crop</span>
+                <span>Extracting thumbnails and candidate faces</span>
+                <span>Comparing ArcFace embeddings</span>
+              </div>
+            )}
           </div>
         )}
 
@@ -352,6 +363,10 @@ export default function App() {
                     <DataRow label="Detector" value={faceData.detection_method} />
                     <DataRow label="Embedding" value={`${faceData.embedding_dimensions} dimensions`} />
                     <DataRow label="Model" value={faceData.embedding_model || 'OpenCV fallback'} />
+                    <DataRow
+                      label="Strict match"
+                      value={faceData.embedding_model?.startsWith('insightface-arcface') ? 'ArcFace ready' : 'ArcFace not loaded'}
+                    />
                   </div>
                 </div>
               ) : (
@@ -380,10 +395,26 @@ export default function App() {
                     <DataRow label="Title" value={bestMatch.title} />
                     <DataRow label="Similarity" value={`${bestMatch.similarity_percent}% (${bestMatch.match_label})`} />
                     <DataRow label="Evidence" value={bestMatch.match_evidence} />
+                    <DataRow label="Provider" value={bestMatch.provider} />
                   </div>
                 </div>
               ) : (
-                <p className="empty-text">No search result selected yet.</p>
+                <div>
+                  <p className="empty-text">No verified public match yet.</p>
+                  {searchData?.provider_results?.length > 0 && (
+                    <div className="mt-3 space-y-2 text-xs text-stone-600">
+                      {searchData.provider_results.map((provider) => (
+                        <div key={provider.provider} className="flex items-center justify-between border-t border-stone-100 pt-2">
+                          <span>{provider.provider}</span>
+                          <span>{provider.error ? provider.error : `${provider.raw_count} results`}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {searchData?.coverage_note && (
+                    <p className="mt-3 text-xs leading-5 text-stone-500">{searchData.coverage_note}</p>
+                  )}
+                </div>
               )}
             </div>
 

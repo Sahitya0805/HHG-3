@@ -10,8 +10,8 @@ Finding where an image appears online usually requires manually performing rever
 
 **FaceTrace** automates this end-to-end:
 1. **Face Detection & Encoding**: Detects human faces in an uploaded image, isolates the primary face crop, and extracts a normalized 512-dimensional facial embedding vector.
-2. **Genuine Reverse Image / Web Search**: Uploads the input image to SerpApi's Image API, queries Google Lens visual matches, and receives public web/social result candidates.
-3. **Candidate Face Matching & Verification**: Downloads discovered candidate images, detects faces, extracts embeddings, and computes cosine similarity scores to select the strongest authentic public match.
+2. **Face-First Public Discovery**: Uploads both the full input image and isolated face crop to SerpApi Google Lens, then optionally searches indexed public profile/post/video pages when a name, handle, or context hint is supplied.
+3. **Candidate Face Matching & Verification**: Extracts candidate images from result thumbnails, OpenGraph/Twitter cards, JSON-LD metadata, visible page images, profile avatars, and video thumbnails/frames where public assets are downloadable. Final matches require local face comparison evidence.
 4. **Canonical Cryptographic Fingerprinting**: Serializes discovered metadata (URL, domain/source, title, snippet caption, timestamp) into deterministic canonical JSON and computes a SHA-256 fingerprint.
 5. **Blockchain Registration**: Submits the 32-byte cryptographic hash to a locally deployed Anvil EVM smart contract (`VerificationRegistry.sol`) with block timestamp and submitter address.
 6. **On-Chain Verification & Tamper Detection**: Queries the blockchain to prove data integrity and features an interactive **Tampering Lab** demonstrating that even a single altered character triggers an immediate `❌ HASH MISMATCH — DATA TAMPERED` alert.
@@ -60,12 +60,12 @@ Finding where an image appears online usually requires manually performing rever
 
 - **Consented Demonstration Mode**: Privacy-conscious by design; raw biometric embeddings and full private content are never posted on-chain.
 - **Multi-tiered Face Detector**: Multi-scale face detection with bounding box annotations, primary face isolation, and normalized 512-dimensional embedding generation.
-- **ArcFace-Preferred Encoding**: Uses InsightFace/ArcFace when installed, with a deterministic OpenCV structural encoder fallback for lightweight local execution.
-- **Genuine Reverse Image Search**: SerpApi Google Lens upload/search flow using `SERPAPI_API_KEY`; no hardcoded/pre-picked result is accepted.
+- **ArcFace-First Encoding**: Uses InsightFace/ArcFace (`buffalo_l` by default) for final matching. The OpenCV structural encoder remains available for face detection/debug and local tests, but strict final matches reject fallback embeddings.
+- **Public Web/Profile/Video Discovery**: Runs SerpApi Google Lens on the full image, SerpApi Google Lens on the cropped face, and SerpApi Google Search across GitHub, LinkedIn, Instagram, X/Twitter, Facebook, YouTube, TikTok, and personal sites when a search hint is provided.
+- **Reason-Coded Candidate Rejections**: Keeps rejected evidence with reasons such as blocked download, missing public image, no detectable face, low similarity, and ArcFace unavailable.
 - **Cosine Similarity Scoring**: Computes $\cos(\theta) = \frac{u \cdot v}{\|u\| \|v\|}$ against candidate images with classification thresholds:
-  - $\ge 90\%$: **Strong Match**
-  - $80\% - 89\%$: **Possible Match**
-  - $< 80\%$: **Reject**
+  - ArcFace: `>= 0.45` strong match, `0.32 - 0.44` possible match
+  - OpenCV fallback debug mode: `>= 0.90` strong match, `0.80 - 0.89` possible match
 - **Canonical Hashing**: Deterministic JSON serialization and SHA-256 hashing to guarantee reproducible fingerprints across platforms.
 - **EVM Smart Contract Integration**: Web3.py client connected to `VerificationRegistry.sol` on a local Anvil chain.
 - **Interactive Tampering Demonstration Lab**: Live metadata editing with real-time SHA-256 recalculation, visual hash diffing, and tamper status badge.
@@ -76,7 +76,7 @@ Finding where an image appears online usually requires manually performing rever
 
 - **Backend**: Python 3.10+, FastAPI, Uvicorn, Pydantic v2
 - **Computer Vision & Math**: OpenCV (`opencv-python-headless`), NumPy, Pillow, optional InsightFace/ONNX Runtime
-- **Web & Visual Search**: Requests, BeautifulSoup4, SerpApi Google Lens
+- **Web & Visual Search**: Requests, BeautifulSoup4, SerpApi Google Lens, SerpApi Google Search
 - **Blockchain**: Web3.py, Anvil, Solidity (`VerificationRegistry.sol`)
 - **Frontend**: React 18, Vite, Tailwind CSS, Lucide Icons
 - **Testing**: Pytest, HTTPX
@@ -87,17 +87,19 @@ Finding where an image appears online usually requires manually performing rever
 
 1. **Detection**: The input image is converted to grayscale, histogram-equalized, and processed to identify facial regions.
 2. **Isolation & Alignment**: Bounding boxes are determined with margin padding, extracting the primary face crop.
-3. **Embedding Generation**: If optional ArcFace dependencies are installed, InsightFace generates a normalized 512-dimensional recognition embedding. Otherwise, the face crop is resized and encoded with deterministic OpenCV structural features.
-4. **Candidate Verification**: For each candidate URL discovered during web search, candidate images are evaluated and the cosine similarity between the original face vector and candidate vector is computed.
+3. **Embedding Generation**: InsightFace/ArcFace generates a normalized 512-dimensional recognition embedding when it can detect the face. If it cannot, the endpoint reports the OpenCV fallback model and strict final matching will not accept it.
+4. **Candidate Verification**: For each public candidate URL, downloadable images/thumbnails/frames are evaluated and ranked by local embedding similarity, not search result position.
 
 ---
 
-## 6. How Reverse Image Search Works
+## 6. How Face-First Public Search Works
 
 FaceTrace abstracts search providers behind the `ReverseImageSearcher` base class:
-- **`GoogleLensSearcher`**: Uses SerpApi Image API upload plus Google Lens visual matches. `SERPAPI_API_KEY` is required for the live pipeline.
-- **`ResultParser`**: Downloads each candidate image where permitted, executes face detection, computes real embedding similarity, and extracts minimal canonical metadata.
-- Candidates without a downloadable image or detectable face are rejected before blockchain registration.
+- **`GoogleLensSearcher:full-image`**: Uses SerpApi Image API upload plus Google Lens visual matches for the original upload.
+- **`GoogleLensSearcher:face-crop`**: Repeats Lens discovery with the isolated face crop to reduce dependence on exact full-image matches.
+- **`PublicWebSearcher`**: Uses SerpApi Google Search with the optional hint to find indexed public profile/post/video pages across likely surfaces.
+- **`ResultParser`**: Extracts candidate media from thumbnails, `og:image`, `twitter:image`, JSON-LD images, visible `<img>` tags, avatar images, and public video posters/frames; then detects faces, embeds them, and computes local similarity.
+- Candidates without a downloadable public image, detectable face, or acceptable similarity are rejected before blockchain registration.
 
 ---
 
@@ -157,7 +159,7 @@ contract VerificationRegistry {
 - Python 3.10+
 - Node.js 18+ and npm
 - Foundry/Anvil for the local EVM (`curl -L https://foundry.paradigm.xyz | bash`, then `foundryup`)
-- A SerpApi API key for Google Lens
+- A SerpApi API key for Google Lens and Google Search
 
 ### Quick Setup
 
@@ -212,10 +214,11 @@ anvil --host 127.0.0.1 --port 8545
 ```
 Copy the printed `CONTRACT_ADDRESS` into `.env`.
 
-### Optional ArcFace Encoder
+### ArcFace Encoder
 ```bash
 .venv/bin/pip install -r requirements-arcface.txt
 ```
+The first run downloads InsightFace model weights into `~/.insightface`. Keep `strict_face_match=true` for real demos. Use `--no-strict-arcface` only when debugging without model support.
 
 ### Start Frontend UI
 ```bash
@@ -226,7 +229,7 @@ Open your browser at: `http://localhost:3000`
 
 ### Run CLI Demo Script
 ```bash
-.venv/bin/python scripts/demo.py --image samples/demo_face.jpg
+.venv/bin/python scripts/demo.py --image samples/demo_face.jpg --query "known public name or handle"
 ```
 
 ### Run Test Suite
@@ -254,10 +257,13 @@ STEP 1: FACE DETECTION & EMBEDDING
  [✓] Embedding model: insightface-arcface-buffalo_l
 
 ==================================================
-STEP 2: GENUINE REVERSE IMAGE SEARCH & MATCHING
+STEP 2: FACE-FIRST PUBLIC WEB/PROFILE/VIDEO SEARCH
 ==================================================
- [*] Querying search provider: GoogleLensSearcher...
- [✓] Reverse image search completed! Candidates discovered: 2
+ [*] Searching Google Lens full image, Google Lens face crop, and hinted public profile/video pages...
+ [✓] Discovery completed. Raw candidates discovered: 18
+     Provider: GoogleLensSearcher:full-image -> 7 raw results
+     Provider: GoogleLensSearcher:face-crop -> 4 raw results
+     Provider: SerpApiPublicWebProfilesVideos -> 7 raw results
      #1 Instagram: Hackathon Demo Post... (Sim: 92.4%) -> Strong Match
 
 ==================================================
@@ -299,7 +305,7 @@ STEP 6: TAMPERING DEMONSTRATION
 
 - **Ephemeral Processing**: Input images are processed in-memory during execution and are not permanently stored in a facial surveillance database.
 - **Zero Biometrics On-Chain**: Only 32-byte cryptographic hashes of public metadata are recorded on the smart contract. Facial vectors and personal identities never touch the blockchain.
-- **Consented Public Demonstration**: Intended exclusively for consented demonstration imagery and public figure content with appropriate rights.
+- **Consented Public Demonstration**: Intended for consented imagery and content the operator is allowed to inspect. Do not use it to identify or track people without permission.
 - **Similarity vs Identity**: High similarity scores indicate visual alignment, not absolute real-world legal identity.
 
 ---
@@ -307,7 +313,9 @@ STEP 6: TAMPERING DEMONSTRATION
 ## 14. Limitations & Future Improvements
 
 - **Search Rate Limits**: SerpApi enforces query and upload limits; the live pipeline requires a valid `SERPAPI_API_KEY`.
-- **Candidate Availability**: Many social platforms block image downloads or omit public OpenGraph images, so some Lens results may be rejected before scoring.
+- **Public Coverage Only**: FaceTrace cannot search private accounts, logged-in feeds, deleted content, or every new reel/post before it appears in public indexes.
+- **Candidate Availability**: Many social platforms block image downloads or omit public OpenGraph images, so some results may be rejected before scoring.
+- **No Custom Training**: "Train it" is implemented as pretrained ArcFace embeddings, not a custom biometric model trained on private faces.
 - **Local Chain Scope**: The primary proof target is local Anvil for reproducible judging. It demonstrates real EVM transactions, but it is not a public permanent chain.
 - **Future Improvements**:
   - Decentralized storage pinning via IPFS / Filecoin for original canonical metadata records.
