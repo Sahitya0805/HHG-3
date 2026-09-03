@@ -84,9 +84,11 @@ export default function App() {
 
   const chainReady = Boolean(health?.blockchain?.connected);
   const backendReady = health?.status === 'healthy';
+  const searchReady = Boolean(health?.search?.configured);
 
   const bestMatch = searchData?.best_match;
-  const canRun = imageFile && !isRunning;
+  const canRunFace = imageFile && !isRunning;
+  const canRunPipeline = imageFile && !isRunning && searchReady && chainReady;
 
   const stepState = useMemo(() => {
     return STEPS.reduce((acc, step) => {
@@ -121,7 +123,7 @@ export default function App() {
   }
 
   async function runPipeline() {
-    if (!imageFile) return;
+    if (!imageFile || !searchReady || !chainReady) return;
 
     try {
       resetResults();
@@ -170,6 +172,27 @@ export default function App() {
     }
   }
 
+  async function runFaceOnly() {
+    if (!imageFile) return;
+
+    try {
+      resetResults();
+      setCompletedSteps(['image']);
+      setActiveStep('face');
+      setLoadingMessage(LOADING_TEXT.face);
+      const face = await uploadAndDetectFace(imageFile);
+      if (!face.face_detected) {
+        throw new Error(face.error || 'No face was detected in this image.');
+      }
+      setFaceData(face);
+      setCompletedSteps(['image', 'face']);
+      setLoadingMessage('');
+    } catch (err) {
+      setErrorMessage(err.message || 'Face detection failed.');
+      setLoadingMessage('');
+    }
+  }
+
   async function copyHash() {
     if (!fingerprintData?.bytes32_hash) return;
     await navigator.clipboard.writeText(fingerprintData.bytes32_hash);
@@ -187,6 +210,7 @@ export default function App() {
           </div>
           <div className="flex flex-wrap gap-2 text-xs">
             <StatusPill ok={backendReady}>Backend {backendReady ? 'online' : 'offline'}</StatusPill>
+            <StatusPill ok={searchReady}>Search {searchReady ? 'ready' : 'key missing'}</StatusPill>
             <StatusPill ok={chainReady}>Local chain {chainReady ? 'ready' : 'not connected'}</StatusPill>
           </div>
         </div>
@@ -207,6 +231,22 @@ export default function App() {
           <div className="mb-5 flex items-center gap-3 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
             <Loader2 className="h-4 w-4 animate-spin" />
             <span>{loadingMessage}</span>
+          </div>
+        )}
+
+        {(!searchReady || !chainReady) && (
+          <div className="mb-5 rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              <div>
+                <p className="font-medium">Full pipeline setup is incomplete.</p>
+                <p className="mt-1 text-amber-900">
+                  {!searchReady ? 'Add SERPAPI_API_KEY to .env. ' : ''}
+                  {!chainReady ? 'Start Anvil and deploy the contract. ' : ''}
+                  Face detection can still be tested now.
+                </p>
+              </div>
+            </div>
           </div>
         )}
 
@@ -259,13 +299,17 @@ export default function App() {
               />
             </div>
 
-            <button type="button" className="primary-button mt-4" onClick={runPipeline} disabled={!canRun}>
-              {isRunning ? 'Running pipeline' : 'Run pipeline'}
+            <button type="button" className="secondary-button mt-4" onClick={runFaceOnly} disabled={!canRunFace}>
+              Test face detection
             </button>
 
-            {!chainReady && (
+            <button type="button" className="primary-button mt-3" onClick={runPipeline} disabled={!canRunPipeline}>
+              {isRunning ? 'Running pipeline' : 'Run full pipeline'}
+            </button>
+
+            {(!searchReady || !chainReady) && (
               <p className="mt-3 text-xs leading-5 text-stone-500">
-                Blockchain steps need Anvil running and a deployed contract.
+                Full pipeline requires SerpApi search and the local EVM contract.
               </p>
             )}
           </section>

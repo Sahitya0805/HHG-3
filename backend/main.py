@@ -56,12 +56,18 @@ blockchain_verifier = BlockchainVerifier()
 @app.get("/api/health")
 def health_check():
     """Returns system status and active submodules."""
+    search_configured = bool(os.getenv("SERPAPI_API_KEY"))
     return {
         "status": "healthy",
         "service": "FaceTrace Pipeline",
         "version": "1.0.0",
         "blockchain": blockchain_verifier.network_info,
         "search_provider": search_orchestrator.provider.__class__.__name__,
+        "search": {
+            "provider": search_orchestrator.provider.__class__.__name__,
+            "configured": search_configured,
+            "error": None if search_configured else "SERPAPI_API_KEY is missing.",
+        },
     }
 
 
@@ -152,6 +158,9 @@ async def search_reverse_image(req: SearchRequest):
     )
 
     if not res.get("success"):
+        error = res.get("error", "Search failed.")
+        if "SERPAPI_API_KEY" in error:
+            error = "Live web search is not configured. Add SERPAPI_API_KEY to .env and restart the backend."
         return SearchResponse(
             success=False,
             provider_name=res.get("provider_name", "SearchOrchestrator"),
@@ -159,7 +168,7 @@ async def search_reverse_image(req: SearchRequest):
             candidates=res.get("candidates", []),
             best_match=res.get("best_match"),
             metadata=res.get("metadata"),
-            error=res.get("error", "Search failed."),
+            error=error,
         )
 
     return SearchResponse(
