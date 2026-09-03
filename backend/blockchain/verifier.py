@@ -59,6 +59,13 @@ class BlockchainVerifier:
                 self.contract_address = self.deploy_contract()["contract_address"]
 
             if self.contract_address:
+                code = self.w3.eth.get_code(Web3.to_checksum_address(self.contract_address))
+                if not code:
+                    self.connection_error = (
+                        f"No contract bytecode found at {self.contract_address}. "
+                        "Redeploy with `python scripts/deploy_contract.py`."
+                    )
+                    return
                 self.contract = self.w3.eth.contract(
                     address=Web3.to_checksum_address(self.contract_address),
                     abi=VERIFICATION_REGISTRY_ABI,
@@ -102,6 +109,10 @@ class BlockchainVerifier:
             raise ValueError(f"Hash must be 64 hexadecimal characters, got {len(clean)}")
         return bytes.fromhex(clean)
 
+    def _to_0x_hex(self, value: Any) -> str:
+        hex_value = value.hex() if hasattr(value, "hex") else str(value)
+        return hex_value if hex_value.startswith("0x") else "0x" + hex_value
+
     def _transaction_fee_fields(self) -> Dict[str, int]:
         assert self.w3 is not None
         latest = self.w3.eth.get_block("latest")
@@ -134,15 +145,22 @@ class BlockchainVerifier:
             bytecode=VERIFICATION_REGISTRY_BYTECODE,
         )
         nonce = self.w3.eth.get_transaction_count(self.account.address)
-        tx = contract_factory.constructor().build_transaction(
-            {
-                "from": self.account.address,
-                "nonce": nonce,
-                "gas": 900_000,
-                **self._transaction_fee_fields(),
-            }
-        )
+        tx_params = {
+            "from": self.account.address,
+            "nonce": nonce,
+            **self._transaction_fee_fields(),
+        }
+        estimated_gas = contract_factory.constructor().estimate_gas({"from": self.account.address})
+        tx_params["gas"] = int(estimated_gas * 1.4)
+        tx = contract_factory.constructor().build_transaction(tx_params)
         receipt = self._sign_and_send(tx)
+        if receipt.status != 1 or not receipt.contractAddress:
+            raise BlockchainConfigurationError("VerificationRegistry deployment transaction failed.")
+
+        code = self.w3.eth.get_code(receipt.contractAddress)
+        if not code:
+            raise BlockchainConfigurationError("Deployment finished, but no contract bytecode exists at the address.")
+
         self.contract_address = receipt.contractAddress
         self.contract = self.w3.eth.contract(
             address=Web3.to_checksum_address(self.contract_address),
@@ -152,7 +170,7 @@ class BlockchainVerifier:
 
         return {
             "success": receipt.status == 1,
-            "transaction_hash": receipt.transactionHash.hex(),
+            "transaction_hash": self._to_0x_hex(receipt.transactionHash),
             "block_number": receipt.blockNumber,
             "gas_used": receipt.gasUsed,
             "contract_address": self.contract_address,
@@ -181,7 +199,7 @@ class BlockchainVerifier:
 
         return {
             "success": receipt.status == 1,
-            "transaction_hash": receipt.transactionHash.hex(),
+            "transaction_hash": self._to_0x_hex(receipt.transactionHash),
             "block_number": receipt.blockNumber,
             "gas_used": receipt.gasUsed,
             "submitter": record[2],
