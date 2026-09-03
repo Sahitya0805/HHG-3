@@ -27,6 +27,7 @@ class FaceDetectionResponse(BaseModel):
 class SearchRequest(BaseModel):
     embedding: List[float]
     image_b64: Optional[str] = None
+    face_crop_b64: Optional[str] = None
     search_query: Optional[str] = None
 
 

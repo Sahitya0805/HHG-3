@@ -112,7 +112,14 @@ def test_api_search_and_hash(monkeypatch):
     img = detector.load_image(_sample_bytes())
     face = detector.detect_faces(img)
     emb = encoder.generate_embedding(face["primary_face_crop"])["embedding"]
-    search_resp = client.post("/api/search", json={"embedding": emb})
+    search_resp = client.post(
+        "/api/search",
+        json={
+            "embedding": emb,
+            "image_b64": "data:image/jpeg;base64,full-image",
+            "face_crop_b64": face["primary_crop_b64"],
+        },
+    )
     assert search_resp.status_code == 200
     sdata = search_resp.json()
     assert sdata["success"] is True

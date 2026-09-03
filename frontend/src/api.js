@@ -51,13 +51,14 @@ export async function uploadAndDetectFace(imageFile) {
   });
 }
 
-export async function searchReverseImage(embedding, imageB64 = null, searchQuery = null) {
+export async function searchReverseImage(embedding, imageB64 = null, searchQuery = null, faceCropB64 = null) {
   return fetchWithFallback('/search', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       embedding,
       image_b64: imageB64,
+      face_crop_b64: faceCropB64,
       search_query: searchQuery,
     }),
   });

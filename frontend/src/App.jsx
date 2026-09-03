@@ -59,6 +59,15 @@ function DataRow({ label, value, mono = false }) {
   );
 }
 
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
 export default function App() {
   const fileInputRef = useRef(null);
   const [health, setHealth] = useState(null);
@@ -140,7 +149,13 @@ export default function App() {
 
       setActiveStep('search');
       setLoadingMessage(LOADING_TEXT.search);
-      const search = await searchReverseImage(face.embedding, face.primary_crop_b64, searchQuery.trim() || null);
+      const fullImageB64 = await fileToDataUrl(imageFile);
+      const search = await searchReverseImage(
+        face.embedding,
+        fullImageB64,
+        searchQuery.trim() || null,
+        face.primary_crop_b64,
+      );
       if (!search.success) {
         throw new Error(search.error || 'No matching public result passed candidate verification.');
       }
@@ -167,7 +182,12 @@ export default function App() {
       setActiveStep('verify');
       setLoadingMessage('');
     } catch (err) {
-      setErrorMessage(err.message || 'Pipeline failed.');
+      const message = err.message || 'Pipeline failed.';
+      setErrorMessage(
+        message.includes("hasn't returned any results") || message.includes('did not find public matches')
+          ? 'No public match found for this image. Use a full image that already appears online, then run again.'
+          : message,
+      );
       setLoadingMessage('');
     }
   }

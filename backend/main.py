@@ -153,7 +153,7 @@ async def search_reverse_image(req: SearchRequest):
     res = search_orchestrator.search_and_match(
         image_bytes=image_bytes,
         input_embedding=req.embedding,
-        input_crop_b64=req.image_b64,
+        input_crop_b64=req.face_crop_b64 or req.image_b64,
         search_query=req.search_query,
     )
 
@@ -161,6 +161,11 @@ async def search_reverse_image(req: SearchRequest):
         error = res.get("error", "Search failed.")
         if "SERPAPI_API_KEY" in error:
             error = "Live web search is not configured. Add SERPAPI_API_KEY to .env and restart the backend."
+        elif "hasn't returned any results" in error or "No search results" in error:
+            error = (
+                "Google Lens did not find public matches for this image. "
+                "Try a full original image that is already visible on the public web."
+            )
         return SearchResponse(
             success=False,
             provider_name=res.get("provider_name", "SearchOrchestrator"),
