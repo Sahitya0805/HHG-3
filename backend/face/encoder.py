@@ -2,23 +2,104 @@
 
 import cv2
 import numpy as np
-from typing import List, Dict, Any
+import os
+from types import SimpleNamespace
+from typing import List, Dict, Any, Optional
 
 
 class FaceEncoder:
-    """Generates normalized 512-dimensional face embeddings."""
+    """Generates normalized 512-dimensional face embeddings.
+
+    InsightFace/ArcFace is preferred when installed. The OpenCV feature encoder is
+    retained as a deterministic fallback for local tests and constrained demos.
+    """
 
     def __init__(self, embedding_dim: int = 512):
         self.embedding_dim = embedding_dim
+        self.model_name = "opencv-structural-fallback"
+        self.arcface_available = False
+        self.arcface_error = None
+        self._insightface = None
+
+        if os.getenv("FACETRACE_DISABLE_ARCFACE", "").lower() in {"1", "true", "yes"}:
+            self.arcface_error = "FACETRACE_DISABLE_ARCFACE is enabled."
+            return
+
+        try:
+            from insightface.app import FaceAnalysis
+
+            model_pack = os.getenv("FACETRACE_ARCFACE_MODEL", "buffalo_l")
+            app = FaceAnalysis(name=model_pack, providers=["CPUExecutionProvider"])
+            app.prepare(ctx_id=0, det_size=(640, 640))
+            self._insightface = app
+            self.model_name = f"insightface-arcface-{model_pack}"
+            self.arcface_available = True
+        except Exception as exc:
+            self._insightface = None
+            self.arcface_error = str(exc)
+
+    def is_arcface_model(self) -> bool:
+        return bool(self.arcface_available and self.model_name.startswith("insightface-arcface"))
+
+    def _format_embedding(self, embedding: np.ndarray, model_name: str) -> Dict[str, Any]:
+        embedding = np.array(embedding, dtype=np.float32).flatten()
+        norm = np.linalg.norm(embedding)
+        if norm > 0:
+            embedding = embedding / norm
+
+        if len(embedding) != self.embedding_dim:
+            embedding = np.resize(embedding, self.embedding_dim)
+
+        embedding_list = [float(round(val, 6)) for val in embedding]
+        return {
+            "embedding_generated": True,
+            "embedding_dimensions": len(embedding_list),
+            "norm": float(round(np.linalg.norm(embedding), 4)),
+            "embedding": embedding_list,
+            "sample_vector": embedding_list[:8],
+            "model": model_name,
+        }
+
+    def generate_embedding_from_landmarks(
+        self,
+        image_bgr: np.ndarray,
+        landmarks: Optional[List[List[int]]] = None,
+    ) -> Dict[str, Any]:
+        """Generate ArcFace embedding using detector-provided five-point landmarks."""
+        if image_bgr is None or image_bgr.size == 0:
+            raise ValueError("Invalid image provided for embedding.")
+
+        if self._insightface is not None and landmarks and len(landmarks) >= 5:
+            try:
+                rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+                face = SimpleNamespace(kps=np.array(landmarks[:5], dtype=np.float32))
+                embedding = self._insightface.models["recognition"].get(rgb, face)
+                return self._format_embedding(embedding, self.model_name)
+            except Exception:
+                pass
+
+        return self.generate_embedding(image_bgr)
 
     def generate_embedding(self, face_crop_bgr: np.ndarray) -> Dict[str, Any]:
         """
         Extract normalized 512-dim facial representation from cropped face image.
-        Uses multi-region spatial histogram & frequency transform for robust representation.
+        Uses ArcFace when available; otherwise uses multi-region spatial histogram
+        and frequency transform features for a reproducible fallback.
         """
         if face_crop_bgr is None or face_crop_bgr.size == 0:
             raise ValueError("Invalid face crop provided for embedding.")
 
+        if self._insightface is not None:
+            rgb = cv2.cvtColor(face_crop_bgr, cv2.COLOR_BGR2RGB)
+            faces = self._insightface.get(rgb)
+            if faces:
+                face = max(
+                    faces,
+                    key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]),
+                )
+                return self._format_embedding(face.embedding, self.model_name)
+
+        fallback_model_name = "opencv-structural-fallback"
         # Standardize face dimensions to 160x160
         target_size = (160, 160)
         resized = cv2.resize(face_crop_bgr, target_size, interpolation=cv2.INTER_AREA)
@@ -73,4 +154,5 @@ class FaceEncoder:
             "norm": float(round(np.linalg.norm(normalized_embedding), 4)),
             "embedding": embedding_list,
             "sample_vector": embedding_list[:8],  # Snippet for display
+            "model": fallback_model_name,
         }

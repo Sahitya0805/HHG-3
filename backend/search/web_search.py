@@ -1,98 +1,112 @@
-"""Genuine live web & social media search provider (Zero hardcoded records)."""
+"""Public web/profile/video discovery backed by SerpApi Google Search."""
 
 import os
-import re
-import urllib.request
-import urllib.parse
-from typing import List, Dict, Any, Optional
-from bs4 import BeautifulSoup
+from typing import Any, Dict, List, Optional
+
+import requests
+
 from backend.search.base import ReverseImageSearcher
 
 
-class LiveWebSearcher(ReverseImageSearcher):
+class PublicWebSearcher(ReverseImageSearcher):
     """
-    Executes live external web and social media searches across public search indexes.
-    Parses genuine live URLs, titles, snippets, and candidate OpenGraph images.
+    Searches public/indexed profile and post surfaces.
+
+    This is not a face-search provider by itself. It uses the optional user hint
+    to discover likely public pages, then ResultParser verifies faces locally.
     """
 
-    def __init__(self, api_key: str = None):
-        self.api_key = api_key or os.getenv("SEARCH_API_KEY")
+    PLATFORM_QUERIES = [
+        ("GitHub", "site:github.com"),
+        ("LinkedIn", "site:linkedin.com/in OR site:linkedin.com/posts"),
+        ("Instagram", "site:instagram.com/p OR site:instagram.com/reel OR site:instagram.com"),
+        ("X (Twitter)", "site:x.com OR site:twitter.com"),
+        ("Facebook", "site:facebook.com/posts OR site:facebook.com/profile.php OR site:facebook.com"),
+        ("YouTube", "site:youtube.com/watch OR site:youtube.com/shorts OR site:youtu.be"),
+        ("TikTok", "site:tiktok.com/@"),
+        ("Personal Sites", "-site:facebook.com -site:instagram.com -site:x.com -site:twitter.com -site:linkedin.com -site:youtube.com -site:tiktok.com -site:github.com"),
+    ]
+
+    VIDEO_TERMS = {
+        "YouTube": "video OR shorts",
+        "TikTok": "video",
+        "Instagram": "reel OR post",
+        "Facebook": "video OR post",
+    }
+
+    def __init__(self, api_key: Optional[str] = None):
+        self.api_key = api_key or os.getenv("SERPAPI_API_KEY")
+        self.search_url = "https://serpapi.com/search.json"
 
     def search(
         self,
         image_bytes: bytes,
         filename: str = "query.jpg",
         search_query: Optional[str] = None,
+        include_videos: bool = True,
+        max_sources: int = 8,
+        max_candidates_per_source: int = 5,
     ) -> List[Dict[str, Any]]:
-        """
-        Genuinely queries external live search engine for public profile and post matches.
-        """
-        results = []
-        # If user provided a query tag or name, use it; otherwise search for public visual / portrait references
-        query_text = search_query.strip() if search_query and search_query.strip() else "portrait public profile social"
+        if not self.api_key:
+            raise ValueError("SERPAPI_API_KEY is required for public web search.")
 
-        # 1. Query live search engine for genuine public web matches
-        search_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query_text)}"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-        }
+        hint = (search_query or "").strip()
+        if not hint:
+            return []
 
-        try:
-            req = urllib.request.Request(search_url, headers=headers)
-            with urllib.request.urlopen(req, timeout=12) as response:
-                html = response.read().decode("utf-8", errors="ignore")
-                soup = BeautifulSoup(html, "html.parser")
+        results: List[Dict[str, Any]] = []
+        selected_queries = self.PLATFORM_QUERIES[: max(1, max_sources)]
 
-                for item in soup.find_all("div", class_="result__body"):
-                    title_tag = item.find("a", class_="result__a")
-                    snippet_tag = item.find("a", class_="result__snippet")
+        for source, site_query in selected_queries:
+            query = f'"{hint}" ({site_query})'
+            if include_videos and source in self.VIDEO_TERMS:
+                query = f"{query} {self.VIDEO_TERMS[source]}"
 
-                    if not title_tag:
-                        continue
+            params = {
+                "engine": "google",
+                "q": query,
+                "api_key": self.api_key,
+                "num": max(1, min(max_candidates_per_source, 10)),
+            }
+            response = requests.get(self.search_url, params=params, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            if data.get("error"):
+                raise RuntimeError(data["error"])
 
-                    raw_href = title_tag.get("href", "")
-                    real_url = raw_href
-                    m = re.search(r"uddg=([^&]+)", raw_href)
-                    if m:
-                        real_url = urllib.parse.unquote(m.group(1))
+            organic = data.get("organic_results", [])
+            inline_images = data.get("inline_images", [])
 
-                    title = title_tag.get_text().strip()
-                    snippet = snippet_tag.get_text().strip() if snippet_tag else ""
+            for item in organic[:max_candidates_per_source]:
+                url = item.get("link") or ""
+                if not url:
+                    continue
+                results.append({
+                    "url": url,
+                    "title": item.get("title") or "Public Web Result",
+                    "source": source,
+                    "image_url": item.get("thumbnail") or "",
+                    "snippet": item.get("snippet") or "",
+                    "provider": "SerpApi Google Search",
+                    "search_query": query,
+                })
 
-                    if not real_url.startswith("http"):
-                        continue
+            for item in inline_images[: max(0, max_candidates_per_source - len(organic))]:
+                original = item.get("original") or item.get("source") or item.get("link") or ""
+                if not original:
+                    continue
+                results.append({
+                    "url": item.get("source") or original,
+                    "title": item.get("title") or "Public Image Result",
+                    "source": source,
+                    "image_url": original,
+                    "snippet": item.get("snippet") or "",
+                    "provider": "SerpApi Google Search Images",
+                    "search_query": query,
+                })
 
-                    # Classify genuine platform
-                    source = "Web"
-                    url_lower = real_url.lower()
-                    if "instagram.com" in url_lower:
-                        source = "Instagram"
-                    elif "linkedin.com" in url_lower:
-                        source = "LinkedIn"
-                    elif "x.com" in url_lower or "twitter.com" in url_lower:
-                        source = "X (Twitter)"
-                    elif "github.com" in url_lower:
-                        source = "GitHub"
-                    elif "youtube.com" in url_lower:
-                        source = "YouTube"
-                    elif "facebook.com" in url_lower:
-                        source = "Facebook"
-                    elif "medium.com" in url_lower:
-                        source = "Medium"
-                    elif "news" in url_lower or "article" in url_lower:
-                        source = "News Media"
+        return results
 
-                    results.append({
-                        "url": real_url,
-                        "title": title,
-                        "source": source,
-                        "image_url": None,  # Will be extracted or checked by ResultParser
-                        "snippet": snippet,
-                    })
-        except Exception as e:
-            print(f"[!] Live search engine query notice: {e}")
 
-        # Limit to top 8 authentic results
-        return results[:8]
+# Backward-compatible name used by older tests/imports.
+LiveWebSearcher = PublicWebSearcher

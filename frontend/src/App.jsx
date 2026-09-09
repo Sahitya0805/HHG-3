@@ -1,380 +1,463 @@
-import React, { useState, useEffect, useRef } from 'react';
-import Header from './components/Header';
-import StepIndicator from './components/StepIndicator';
-import ImageUpload from './components/ImageUpload';
-import SearchResult from './components/SearchResult';
-import BlockchainResult from './components/BlockchainResult';
-import Verification from './components/Verification';
-import TamperDemo from './components/TamperDemo';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  AlertCircle,
+  Check,
+  Copy,
+  ExternalLink,
+  Loader2,
+  RefreshCw,
+  Search,
+  ShieldCheck,
+  Upload,
+} from 'lucide-react';
 import {
   checkHealth,
-  uploadAndDetectFace,
-  searchReverseImage,
   generateFingerprint,
+  searchReverseImage,
   storeOnBlockchain,
+  uploadAndDetectFace,
   verifyOnBlockchain,
-  runFullPipeline,
 } from './api';
-import { Play, RotateCcw, AlertCircle, Sparkles } from 'lucide-react';
+
+const STEPS = [
+  { id: 'image', label: 'Image' },
+  { id: 'face', label: 'Face' },
+  { id: 'search', label: 'Search' },
+  { id: 'hash', label: 'Hash' },
+  { id: 'chain', label: 'Chain' },
+  { id: 'verify', label: 'Verify' },
+];
+
+const LOADING_TEXT = {
+  face: 'Detecting the face and building the embedding',
+  search: 'Searching public web/profile/video sources',
+  hash: 'Canonicalizing the discovered post metadata',
+  chain: 'Writing the metadata hash to the local EVM contract',
+  verify: 'Reading the contract record and comparing hashes',
+};
+
+function shortHash(value = '') {
+  if (!value) return 'Not available';
+  return `${value.slice(0, 14)}...${value.slice(-10)}`;
+}
+
+function StatusPill({ ok, children }) {
+  return (
+    <span className={`status-pill ${ok ? 'status-ok' : 'status-warn'}`}>
+      <span className="status-dot" />
+      {children}
+    </span>
+  );
+}
+
+function DataRow({ label, value, mono = false }) {
+  return (
+    <div className="data-row">
+      <span>{label}</span>
+      <strong className={mono ? 'font-mono break-all' : ''}>{value || 'Not available'}</strong>
+    </div>
+  );
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
 
 export default function App() {
+  const fileInputRef = useRef(null);
   const [health, setHealth] = useState(null);
-  const [currentStep, setCurrentStep] = useState(1);
   const [imageFile, setImageFile] = useState(null);
   const [imagePreview, setImagePreview] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [activeStep, setActiveStep] = useState('image');
+  const [completedSteps, setCompletedSteps] = useState([]);
+  const [loadingMessage, setLoadingMessage] = useState('');
+  const [errorMessage, setErrorMessage] = useState('');
   const [faceData, setFaceData] = useState(null);
   const [searchData, setSearchData] = useState(null);
   const [fingerprintData, setFingerprintData] = useState(null);
   const [blockchainData, setBlockchainData] = useState(null);
   const [verificationData, setVerificationData] = useState(null);
-  const [showTamperLab, setShowTamperLab] = useState(false);
+  const [copied, setCopied] = useState(false);
 
-  const [loading, setLoading] = useState(false);
-  const [pipelineRunning, setPipelineRunning] = useState(false);
-  const [errorMessage, setErrorMessage] = useState(null);
-
-  const searchSectionRef = useRef(null);
-  const blockchainSectionRef = useRef(null);
-  const verificationSectionRef = useRef(null);
+  const isRunning = Boolean(loadingMessage);
 
   useEffect(() => {
-    checkHealth()
-      .then(setHealth)
-      .catch((err) => console.error('Health check error:', err));
+    checkHealth().then(setHealth).catch(() => setHealth(null));
   }, []);
 
-  const handleImageSelected = async (file) => {
-    setImageFile(file);
-    setImagePreview(URL.createObjectURL(file));
-    setErrorMessage(null);
-    setShowTamperLab(false);
-    setSearchData(null);
-    setFingerprintData(null);
-    setBlockchainData(null);
-    setVerificationData(null);
-    setCurrentStep(1);
+  const chainReady = Boolean(health?.blockchain?.connected);
+  const backendReady = health?.status === 'healthy';
+  const searchReady = Boolean(health?.search?.configured);
 
-    try {
-      setLoading(true);
-      const data = await uploadAndDetectFace(file);
-      setFaceData(data);
-      if (!data.face_detected) {
-        setErrorMessage(data.error || 'No human face detected. Please upload an image with a visible face.');
-      } else {
-        setErrorMessage(null);
-        // Automatically trigger search
-        executeSearch(data.embedding, data.primary_crop_b64, searchQuery);
-      }
-    } catch (err) {
-      setFaceData({
-        face_detected: false,
-        faces_found: 0,
-        error: err.message || 'No human face detected. Please upload an image with a visible face.',
-      });
-      setErrorMessage(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const bestMatch = searchData?.best_match;
+  const canRunFace = imageFile && !isRunning;
+  const canRunPipeline = imageFile && !isRunning && searchReady && chainReady;
 
-  const executeSearch = async (embedding, cropB64, query = null) => {
-    try {
-      setLoading(true);
-      setCurrentStep(2);
-      setTimeout(() => {
-        searchSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }, 100);
+  const stepState = useMemo(() => {
+    return STEPS.reduce((acc, step) => {
+      acc[step.id] = completedSteps.includes(step.id)
+        ? 'done'
+        : activeStep === step.id
+          ? 'active'
+          : 'idle';
+      return acc;
+    }, {});
+  }, [activeStep, completedSteps]);
 
-      const targetQuery = query !== null ? query : searchQuery;
-      const data = await searchReverseImage(embedding, cropB64, targetQuery);
-      setSearchData(data);
-      setCurrentStep(2);
-    } catch (err) {
-      setErrorMessage(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleLoadSample = async () => {
-    try {
-      setLoading(true);
-      setErrorMessage(null);
-      const res = await fetch('https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=500&auto=format&fit=crop&q=80');
-      const blob = await res.blob();
-      const file = new File([blob], 'consented_face_sample.jpg', { type: 'image/jpeg' });
-      await handleImageSelected(file);
-    } catch (err) {
-      const response = await fetch('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300"><rect width="300" height="300" fill="%23f0f4f8"/><circle cx="150" cy="150" r="70" fill="%23fbcfe8"/><circle cx="125" cy="135" r="8" fill="%231e293b"/><circle cx="175" cy="135" r="8" fill="%231e293b"/><path d="M 130 180 Q 150 200 170 180" stroke="%23e11d48" stroke-width="4" fill="none"/></svg>');
-      const blob = await response.blob();
-      const file = new File([blob], 'demo_face.jpg', { type: 'image/jpeg' });
-      await handleImageSelected(file);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleLoadNonFaceSample = async () => {
-    try {
-      setLoading(true);
-      setErrorMessage(null);
-      const canvas = document.createElement('canvas');
-      canvas.width = 400;
-      canvas.height = 300;
-      const ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#1e293b';
-      ctx.fillRect(0, 0, 400, 300);
-      ctx.fillStyle = '#0284c7';
-      ctx.fillRect(80, 120, 240, 80);
-      ctx.fillStyle = '#0f172a';
-      ctx.beginPath();
-      ctx.arc(130, 210, 25, 0, Math.PI * 2);
-      ctx.arc(270, 210, 25, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#ffffff';
-      ctx.font = 'bold 20px sans-serif';
-      ctx.fillText('NON-FACE OBJECT (CAR)', 70, 80);
-
-      canvas.toBlob(async (blob) => {
-        const file = new File([blob], 'non_face_car.png', { type: 'image/png' });
-        await handleImageSelected(file);
-      }, 'image/png');
-    } catch (err) {
-      setErrorMessage('Could not generate non-face test image');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleStartSearch = async () => {
-    if (!faceData?.embedding) return;
-    await executeSearch(faceData.embedding, faceData.primary_crop_b64, searchQuery);
-  };
-
-  const handleProceedToHash = async () => {
-    if (!searchData?.metadata) return;
-    try {
-      setLoading(true);
-      setErrorMessage(null);
-      setCurrentStep(3);
-      const data = await generateFingerprint(searchData.metadata);
-      setFingerprintData(data);
-      setTimeout(() => {
-        blockchainSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }, 100);
-    } catch (err) {
-      setErrorMessage(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleUploadBlockchain = async () => {
-    if (!fingerprintData?.hash) return;
-    try {
-      setLoading(true);
-      setErrorMessage(null);
-      setCurrentStep(4);
-      const data = await storeOnBlockchain(fingerprintData.hash);
-      setBlockchainData(data);
-    } catch (err) {
-      setErrorMessage(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleVerifyBlockchain = async () => {
-    if (!fingerprintData?.hash) return;
-    try {
-      setLoading(true);
-      setErrorMessage(null);
-      setCurrentStep(5);
-      const data = await verifyOnBlockchain(fingerprintData.hash);
-      setVerificationData(data);
-      setTimeout(() => {
-        verificationSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }, 100);
-    } catch (err) {
-      setErrorMessage(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleRunFullPipeline = async () => {
-    let targetFile = imageFile;
-    if (!targetFile || (faceData && !faceData.face_detected)) {
-      try {
-        const res = await fetch('https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=500&auto=format&fit=crop&q=80');
-        const blob = await res.blob();
-        targetFile = new File([blob], 'consented_face_sample.jpg', { type: 'image/jpeg' });
-        setImageFile(targetFile);
-        setImagePreview(URL.createObjectURL(targetFile));
-      } catch (e) {
-        return;
-      }
-    }
-
-    try {
-      setPipelineRunning(true);
-      setErrorMessage(null);
-
-      const fullData = await runFullPipeline(targetFile);
-      setFaceData({
-        face_detected: true,
-        faces_found: fullData.face.faces_found,
-        embedding_generated: true,
-        embedding_dimensions: fullData.face.embedding_dimensions,
-        primary_crop_b64: fullData.face.primary_crop_b64,
-        annotated_image_b64: fullData.face.annotated_image_b64,
-        sample_vector: fullData.face.sample_vector,
-      });
-      setSearchData({
-        provider_name: fullData.search.provider,
-        total_candidates: fullData.search.candidates.length,
-        candidates: fullData.search.candidates,
-        best_match: fullData.search.best_match,
-        metadata: fullData.metadata,
-      });
-      setFingerprintData(fullData.fingerprint);
-      setBlockchainData(fullData.blockchain);
-      setVerificationData(fullData.verification);
-      setCurrentStep(5);
-
-      setTimeout(() => {
-        verificationSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }, 200);
-    } catch (err) {
-      setErrorMessage(err.message);
-    } finally {
-      setPipelineRunning(false);
-    }
-  };
-
-  const handleReset = () => {
-    setImageFile(null);
-    setImagePreview(null);
-    setSearchQuery('');
+  function resetResults() {
+    setCompletedSteps([]);
+    setActiveStep('image');
+    setLoadingMessage('');
+    setErrorMessage('');
     setFaceData(null);
     setSearchData(null);
     setFingerprintData(null);
     setBlockchainData(null);
     setVerificationData(null);
-    setShowTamperLab(false);
-    setErrorMessage(null);
-    setCurrentStep(1);
-  };
+    setCopied(false);
+  }
+
+  function handleFileSelected(file) {
+    if (!file) return;
+    resetResults();
+    setImageFile(file);
+    setImagePreview(URL.createObjectURL(file));
+    setCompletedSteps(['image']);
+  }
+
+  async function runPipeline() {
+    if (!imageFile || !searchReady || !chainReady) return;
+
+    try {
+      resetResults();
+      setCompletedSteps(['image']);
+
+      setActiveStep('face');
+      setLoadingMessage(LOADING_TEXT.face);
+      const face = await uploadAndDetectFace(imageFile);
+      if (!face.face_detected) {
+        throw new Error(face.error || 'No face was detected in this image.');
+      }
+      setFaceData(face);
+      setCompletedSteps(['image', 'face']);
+
+      setActiveStep('search');
+      setLoadingMessage(LOADING_TEXT.search);
+      const fullImageB64 = await fileToDataUrl(imageFile);
+      const search = await searchReverseImage(
+        face.embedding,
+        fullImageB64,
+        searchQuery.trim() || null,
+        face.primary_crop_b64,
+        face.embedding_model,
+      );
+      if (!search.success) {
+        setSearchData(search);
+        throw new Error(search.error || 'No matching public result passed candidate verification.');
+      }
+      setSearchData(search);
+      setCompletedSteps(['image', 'face', 'search']);
+
+      setActiveStep('hash');
+      setLoadingMessage(LOADING_TEXT.hash);
+      const fingerprint = await generateFingerprint(search.metadata);
+      setFingerprintData(fingerprint);
+      setCompletedSteps(['image', 'face', 'search', 'hash']);
+
+      setActiveStep('chain');
+      setLoadingMessage(LOADING_TEXT.chain);
+      const blockchain = await storeOnBlockchain(fingerprint.hash);
+      setBlockchainData(blockchain);
+      setCompletedSteps(['image', 'face', 'search', 'hash', 'chain']);
+
+      setActiveStep('verify');
+      setLoadingMessage(LOADING_TEXT.verify);
+      const verification = await verifyOnBlockchain(fingerprint.hash);
+      setVerificationData(verification);
+      setCompletedSteps(['image', 'face', 'search', 'hash', 'chain', 'verify']);
+      setActiveStep('verify');
+      setLoadingMessage('');
+    } catch (err) {
+      const message = err.message || 'Pipeline failed.';
+      setErrorMessage(
+        message.includes("hasn't returned any results") || message.includes('did not find public matches')
+          ? 'No public match found for this image. Use a full image that already appears online, then run again.'
+          : message,
+      );
+      setLoadingMessage('');
+    }
+  }
+
+  async function runFaceOnly() {
+    if (!imageFile) return;
+
+    try {
+      resetResults();
+      setCompletedSteps(['image']);
+      setActiveStep('face');
+      setLoadingMessage(LOADING_TEXT.face);
+      const face = await uploadAndDetectFace(imageFile);
+      if (!face.face_detected) {
+        throw new Error(face.error || 'No face was detected in this image.');
+      }
+      setFaceData(face);
+      setCompletedSteps(['image', 'face']);
+      setLoadingMessage('');
+    } catch (err) {
+      setErrorMessage(err.message || 'Face detection failed.');
+      setLoadingMessage('');
+    }
+  }
+
+  async function copyHash() {
+    if (!fingerprintData?.bytes32_hash) return;
+    await navigator.clipboard.writeText(fingerprintData.bytes32_hash);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }
 
   return (
-    <div className="min-h-screen bg-[#090d16] text-slate-100 flex flex-col justify-between">
-      <div>
-        <Header health={health} />
-        <StepIndicator currentStep={currentStep} />
+    <main className="min-h-screen bg-stone-50 text-stone-950">
+      <header className="border-b border-stone-200 bg-white">
+        <div className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-5 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">FaceTrace</h1>
+            <p className="mt-1 text-sm text-stone-600">Face scan to verified public post record.</p>
+          </div>
+          <div className="flex flex-wrap gap-2 text-xs">
+            <StatusPill ok={backendReady}>Backend {backendReady ? 'online' : 'offline'}</StatusPill>
+            <StatusPill ok={searchReady}>Search {searchReady ? 'ready' : 'key missing'}</StatusPill>
+            <StatusPill ok={chainReady}>Local chain {chainReady ? 'ready' : 'not connected'}</StatusPill>
+          </div>
+        </div>
+      </header>
 
-        <main className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-4 space-y-6">
-          {/* Quick Actions Bar */}
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-slate-900/60 p-3 rounded-2xl border border-slate-800">
-            <div className="flex items-center space-x-2">
-              <span className="h-2 w-2 rounded-full bg-cyan-400 animate-pulse" />
-              <span className="text-xs font-semibold text-slate-300">
-                Privacy-First Automated Verification Pipeline
-              </span>
+      <section className="mx-auto max-w-6xl px-4 py-6">
+        <div className="mb-5 grid grid-cols-3 gap-2 sm:grid-cols-6">
+          {STEPS.map((step) => (
+            <div key={step.id} className={`step ${stepState[step.id]}`}>
+              <span>{step.label}</span>
+              {stepState[step.id] === 'done' && <Check className="h-4 w-4" />}
+              {stepState[step.id] === 'active' && <Loader2 className="h-4 w-4 animate-spin" />}
             </div>
+          ))}
+        </div>
 
-            <div className="flex items-center space-x-2 w-full sm:w-auto">
-              <button
-                type="button"
-                onClick={handleRunFullPipeline}
-                disabled={pipelineRunning || loading}
-                className="flex-1 sm:flex-none flex items-center justify-center space-x-1.5 px-4 py-2 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 font-bold text-xs shadow-lg shadow-cyan-500/20 transition-all cursor-pointer"
-              >
-                <Play className="h-3.5 w-3.5 fill-current" />
-                <span>{pipelineRunning ? 'Executing Pipeline...' : 'Run 1-Click Complete Pipeline'}</span>
+        {loadingMessage && (
+          <div className="mb-5 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+            <div className="flex items-center gap-3">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            <span>{loadingMessage}</span>
+            </div>
+            {activeStep === 'search' && (
+              <div className="mt-2 grid gap-1 pl-7 text-xs text-blue-800 sm:grid-cols-3">
+                <span>Google Lens full image + face crop</span>
+                <span>Extracting thumbnails and candidate faces</span>
+                <span>Comparing ArcFace embeddings</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {(!searchReady || !chainReady) && (
+          <div className="mb-5 rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              <div>
+                <p className="font-medium">Full pipeline setup is incomplete.</p>
+                <p className="mt-1 text-amber-900">
+                  {!searchReady ? 'Add SERPAPI_API_KEY to .env. ' : ''}
+                  {!chainReady ? 'Start Anvil and deploy the contract. ' : ''}
+                  Face detection can still be tested now.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {errorMessage && (
+          <div className="mb-5 flex items-start gap-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{errorMessage}</span>
+          </div>
+        )}
+
+        <div className="grid gap-5 lg:grid-cols-[380px_1fr]">
+          <section className="panel">
+            <div className="panel-header">
+              <h2>Input</h2>
+              <button type="button" className="icon-button" onClick={resetResults} title="Reset results">
+                <RefreshCw className="h-4 w-4" />
               </button>
-
-              <button
-                type="button"
-                onClick={handleReset}
-                className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 border border-slate-700 text-xs transition cursor-pointer"
-                title="Reset All"
-              >
-                <RotateCcw className="h-4 w-4" />
-              </button>
             </div>
-          </div>
 
-          {/* Error Message Toast */}
-          {errorMessage && (
-            <div className="bg-rose-950/70 border border-rose-500/60 rounded-xl p-4 flex items-center space-x-3 text-rose-200 text-xs shadow-lg shadow-rose-950/30">
-              <AlertCircle className="h-5 w-5 text-rose-400 shrink-0" />
-              <span className="font-semibold">{errorMessage}</span>
-            </div>
-          )}
-
-          {/* Step 1: Face Detection */}
-          <ImageUpload
-            imagePreview={imagePreview}
-            faceData={faceData}
-            loading={loading}
-            searchQuery={searchQuery}
-            onSearchQueryChange={setSearchQuery}
-            onImageSelected={handleImageSelected}
-            onLoadSample={handleLoadSample}
-            onLoadNonFaceSample={handleLoadNonFaceSample}
-            onStartSearch={handleStartSearch}
-          />
-
-          {/* Step 2: Reverse Search */}
-          <div ref={searchSectionRef} id="step-search-results">
-            {faceData?.face_detected && (currentStep >= 2 || searchData || loading) && (
-              <SearchResult
-                searchData={searchData}
-                loading={loading && currentStep === 2}
-                onProceedToHash={handleProceedToHash}
-              />
-            )}
-          </div>
-
-          {/* Step 3 & 4: Fingerprint & Blockchain Registration */}
-          <div ref={blockchainSectionRef}>
-            {faceData?.face_detected && (currentStep >= 3 || fingerprintData) && (
-              <BlockchainResult
-                fingerprintData={fingerprintData}
-                blockchainData={blockchainData}
-                loading={loading && (currentStep === 3 || currentStep === 4)}
-                onUploadBlockchain={handleUploadBlockchain}
-                onVerifyBlockchain={handleVerifyBlockchain}
-              />
-            )}
-          </div>
-
-          {/* Step 5: On-Chain Verification */}
-          <div ref={verificationSectionRef}>
-            {faceData?.face_detected && (currentStep >= 5 || verificationData) && (
-              <Verification
-                verificationData={verificationData}
-                fingerprintData={fingerprintData}
-                onOpenTamperLab={() => setShowTamperLab(true)}
-              />
-            )}
-          </div>
-
-          {/* Step 6: Interactive Tampering Demonstration Lab */}
-          {faceData?.face_detected && showTamperLab && searchData?.metadata && (
-            <TamperDemo
-              originalMetadata={searchData.metadata}
-              onChainHash={verificationData?.on_chain_hash || fingerprintData?.bytes32_hash}
-              onClose={() => setShowTamperLab(false)}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".jpg,.jpeg,.png,.webp"
+              className="hidden"
+              onChange={(event) => handleFileSelected(event.target.files?.[0])}
             />
-          )}
-        </main>
-      </div>
 
-      <footer className="max-w-5xl mx-auto w-full px-4 py-6 text-center text-xs text-slate-500 border-t border-slate-900 mt-8">
-        FaceTrace Pipeline • Built for Hackathon Evaluation • Privacy-preserving Biometric Blockchain Verification
-      </footer>
-    </div>
+            <button type="button" className="upload-box" onClick={() => fileInputRef.current?.click()}>
+              {imagePreview ? (
+                <img src={imagePreview} alt="Selected input" />
+              ) : (
+                <span className="flex flex-col items-center gap-2 text-stone-500">
+                  <Upload className="h-8 w-8" />
+                  Select a face image
+                </span>
+              )}
+            </button>
+
+            <label className="mt-4 block text-sm font-medium text-stone-700" htmlFor="search-query">
+              Search hint
+            </label>
+            <div className="mt-2 flex items-center gap-2 rounded-md border border-stone-300 bg-white px-3 py-2">
+              <Search className="h-4 w-4 text-stone-400" />
+              <input
+                id="search-query"
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="Optional name, handle, or context"
+                className="w-full bg-transparent text-sm outline-none placeholder:text-stone-400"
+              />
+            </div>
+
+            <button type="button" className="secondary-button mt-4" onClick={runFaceOnly} disabled={!canRunFace}>
+              Test face detection
+            </button>
+
+            <button type="button" className="primary-button mt-3" onClick={runPipeline} disabled={!canRunPipeline}>
+              {isRunning ? 'Running pipeline' : 'Run full pipeline'}
+            </button>
+
+            {(!searchReady || !chainReady) && (
+              <p className="mt-3 text-xs leading-5 text-stone-500">
+                Full pipeline requires SerpApi search and the local EVM contract.
+              </p>
+            )}
+          </section>
+
+          <section className="space-y-5">
+            <div className="panel">
+              <div className="panel-header">
+                <h2>Face</h2>
+                {faceData?.face_detected && <Check className="h-4 w-4 text-emerald-600" />}
+              </div>
+              {faceData ? (
+                <div className="grid gap-4 md:grid-cols-[220px_1fr]">
+                  <img
+                    src={faceData.annotated_image_b64 || imagePreview}
+                    alt="Detected face"
+                    className="h-48 w-full rounded-md border border-stone-200 object-contain"
+                  />
+                  <div>
+                    <DataRow label="Faces found" value={faceData.faces_found} />
+                    <DataRow label="Detector" value={faceData.detection_method} />
+                    <DataRow label="Embedding" value={`${faceData.embedding_dimensions} dimensions`} />
+                    <DataRow label="Model" value={faceData.embedding_model || 'OpenCV fallback'} />
+                    <DataRow
+                      label="Strict match"
+                      value={faceData.embedding_model?.startsWith('insightface-arcface') ? 'ArcFace ready' : 'ArcFace not loaded'}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <p className="empty-text">No face processed yet.</p>
+              )}
+            </div>
+
+            <div className="panel">
+              <div className="panel-header">
+                <h2>Matched Post</h2>
+                {bestMatch?.url && (
+                  <a href={bestMatch.url} target="_blank" rel="noreferrer" className="link-button">
+                    Open <ExternalLink className="h-3.5 w-3.5" />
+                  </a>
+                )}
+              </div>
+              {bestMatch ? (
+                <div className="grid gap-4 md:grid-cols-[140px_1fr]">
+                  <img
+                    src={bestMatch.candidate_face_preview || bestMatch.image_url}
+                    alt="Candidate face"
+                    className="h-36 w-full rounded-md border border-stone-200 object-cover"
+                  />
+                  <div>
+                    <DataRow label="Source" value={bestMatch.source} />
+                    <DataRow label="Title" value={bestMatch.title} />
+                    <DataRow label="Similarity" value={`${bestMatch.similarity_percent}% (${bestMatch.match_label})`} />
+                    <DataRow label="Evidence" value={bestMatch.match_evidence} />
+                    <DataRow label="Provider" value={bestMatch.provider} />
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <p className="empty-text">No verified public match yet.</p>
+                  {searchData?.provider_results?.length > 0 && (
+                    <div className="mt-3 space-y-2 text-xs text-stone-600">
+                      {searchData.provider_results.map((provider) => (
+                        <div key={provider.provider} className="flex items-center justify-between border-t border-stone-100 pt-2">
+                          <span>{provider.provider}</span>
+                          <span>{provider.error ? provider.error : `${provider.raw_count} results`}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {searchData?.coverage_note && (
+                    <p className="mt-3 text-xs leading-5 text-stone-500">{searchData.coverage_note}</p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="grid gap-5 xl:grid-cols-2">
+              <div className="panel">
+                <div className="panel-header">
+                  <h2>Fingerprint</h2>
+                  {fingerprintData?.bytes32_hash && (
+                    <button type="button" className="icon-button" onClick={copyHash} title="Copy hash">
+                      {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                    </button>
+                  )}
+                </div>
+                {fingerprintData ? (
+                  <>
+                    <DataRow label="Algorithm" value={fingerprintData.algorithm} />
+                    <DataRow label="Hash" value={shortHash(fingerprintData.bytes32_hash)} mono />
+                  </>
+                ) : (
+                  <p className="empty-text">No hash generated yet.</p>
+                )}
+              </div>
+
+              <div className="panel">
+                <div className="panel-header">
+                  <h2>Blockchain</h2>
+                  {verificationData?.verified && <ShieldCheck className="h-4 w-4 text-emerald-600" />}
+                </div>
+                {blockchainData ? (
+                  <>
+                    <DataRow label="Transaction" value={shortHash(blockchainData.transaction_hash)} mono />
+                    <DataRow label="Block" value={blockchainData.block_number} />
+                    <DataRow label="Contract" value={shortHash(blockchainData.contract_address)} mono />
+                    <DataRow label="Verified" value={verificationData?.verified ? 'Yes' : 'Pending'} />
+                  </>
+                ) : (
+                  <p className="empty-text">No chain record yet.</p>
+                )}
+              </div>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
   );
 }

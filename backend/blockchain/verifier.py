@@ -1,70 +1,104 @@
-"""Blockchain verification and storage interface using Web3.py."""
+"""Blockchain verification and storage interface using a real local EVM."""
 
 import os
-import time
-import hashlib
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
+
 from web3 import Web3
-from eth_account import Account
-from backend.blockchain.contract import VERIFICATION_REGISTRY_ABI
+
+from backend.blockchain.contract import (
+    VERIFICATION_REGISTRY_ABI,
+    VERIFICATION_REGISTRY_BYTECODE,
+)
+
+
+class BlockchainConfigurationError(RuntimeError):
+    """Raised when no usable EVM configuration is available."""
 
 
 class BlockchainVerifier:
-    """Manages EVM testnet and local simulated blockchain storage and verification."""
+    """Stores and verifies metadata hashes in a deployed EVM registry contract."""
+
+    DEFAULT_LOCAL_RPC_URL = "http://127.0.0.1:8545"
 
     def __init__(
         self,
         rpc_url: Optional[str] = None,
         private_key: Optional[str] = None,
         contract_address: Optional[str] = None,
+        auto_deploy: Optional[bool] = None,
     ):
-        self.rpc_url = rpc_url or os.getenv("RPC_URL", "")
+        self.rpc_url = rpc_url or os.getenv("LOCAL_RPC_URL") or os.getenv("RPC_URL") or self.DEFAULT_LOCAL_RPC_URL
         self.private_key = private_key or os.getenv("PRIVATE_KEY", "")
         self.contract_address = contract_address or os.getenv("CONTRACT_ADDRESS", "")
-        self.is_live = bool(self.rpc_url and self.private_key and self.contract_address)
-
-        # In-memory storage fallback for offline / local demo & tests
-        self._local_records: Dict[str, Dict[str, Any]] = {}
-        self._local_account = Account.create("facetrace-demo-entropy-seed")
-        self.mock_contract_address = "0x71C67Ed3855aa521e0704673057e6250BE602876"
+        self.auto_deploy = (
+            auto_deploy
+            if auto_deploy is not None
+            else os.getenv("AUTO_DEPLOY_CONTRACT", "").lower() in {"1", "true", "yes"}
+        )
 
         self.w3: Optional[Web3] = None
         self.contract = None
         self.account = None
+        self.connection_error: Optional[str] = None
 
-        if self.is_live:
-            try:
-                self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
-                if self.w3.is_connected():
-                    self.account = self.w3.eth.account.from_key(self.private_key)
-                    self.contract = self.w3.eth.contract(
-                        address=Web3.to_checksum_address(self.contract_address),
-                        abi=VERIFICATION_REGISTRY_ABI,
+        self._connect()
+
+    def _connect(self) -> None:
+        try:
+            self.w3 = Web3(Web3.HTTPProvider(self.rpc_url, request_kwargs={"timeout": 10}))
+            if not self.w3.is_connected():
+                self.connection_error = f"Could not connect to EVM RPC at {self.rpc_url}."
+                return
+
+            if not self.private_key:
+                self.connection_error = "PRIVATE_KEY is required for blockchain transactions."
+                return
+
+            self.account = self.w3.eth.account.from_key(self.private_key)
+            if not self.contract_address and self.auto_deploy:
+                self.contract_address = self.deploy_contract()["contract_address"]
+
+            if self.contract_address:
+                code = self.w3.eth.get_code(Web3.to_checksum_address(self.contract_address))
+                if not code:
+                    self.connection_error = (
+                        f"No contract bytecode found at {self.contract_address}. "
+                        "Redeploy with `python scripts/deploy_contract.py`."
                     )
-                else:
-                    self.is_live = False
-            except Exception:
-                self.is_live = False
+                    return
+                self.contract = self.w3.eth.contract(
+                    address=Web3.to_checksum_address(self.contract_address),
+                    abi=VERIFICATION_REGISTRY_ABI,
+                )
+                self.connection_error = None
+            else:
+                self.connection_error = "CONTRACT_ADDRESS is required. Run scripts/deploy_contract.py first."
+        except Exception as exc:
+            self.connection_error = str(exc)
 
     @property
     def network_info(self) -> Dict[str, Any]:
         """Returns active network information."""
-        if self.is_live and self.w3:
-            return {
-                "mode": "live_testnet",
-                "chain_id": self.w3.eth.chain_id,
-                "contract_address": self.contract_address,
-                "wallet_address": self.account.address if self.account else None,
-                "connected": True,
-            }
+        connected = bool(self.w3 and self.w3.is_connected() and self.account)
         return {
-            "mode": "local_evm_simulation",
-            "chain_id": 1337,
-            "contract_address": self.mock_contract_address,
-            "wallet_address": self._local_account.address,
-            "connected": True,
-            "note": "Running with full local EVM ledger simulation",
+            "mode": "local_anvil_evm",
+            "chain_id": self.w3.eth.chain_id if connected and self.w3 else None,
+            "rpc_url": self.rpc_url,
+            "contract_address": self.contract_address or None,
+            "wallet_address": self.account.address if self.account else None,
+            "connected": connected and self.contract is not None,
+            "error": self.connection_error,
         }
+
+    def _require_ready(self) -> None:
+        if not (self.w3 and self.w3.is_connected()):
+            raise BlockchainConfigurationError(
+                f"Anvil RPC is unavailable at {self.rpc_url}. Start it with `anvil --host 127.0.0.1 --port 8545`."
+            )
+        if not self.account:
+            raise BlockchainConfigurationError("PRIVATE_KEY is required in .env.")
+        if not self.contract:
+            raise BlockchainConfigurationError("CONTRACT_ADDRESS is required. Run `python scripts/deploy_contract.py`.")
 
     def _normalize_hash(self, hash_str: str) -> bytes:
         """Ensure hash is 32 bytes binary."""
@@ -75,106 +109,123 @@ class BlockchainVerifier:
             raise ValueError(f"Hash must be 64 hexadecimal characters, got {len(clean)}")
         return bytes.fromhex(clean)
 
-    def store_hash(self, hash_str: str) -> Dict[str, Any]:
-        """Store SHA-256 fingerprint hash on-chain."""
-        hash_bytes = self._normalize_hash(hash_str)
-        hash_hex_standard = "0x" + hash_bytes.hex()
-        current_time = int(time.time())
+    def _to_0x_hex(self, value: Any) -> str:
+        hex_value = value.hex() if hasattr(value, "hex") else str(value)
+        return hex_value if hex_value.startswith("0x") else "0x" + hex_value
 
-        if self.is_live and self.w3 and self.contract and self.account:
-            try:
-                nonce = self.w3.eth.get_transaction_count(self.account.address)
-                tx = self.contract.functions.storeRecord(hash_bytes).build_transaction(
-                    {
-                        "from": self.account.address,
-                        "nonce": nonce,
-                        "gas": 150000,
-                        "maxFeePerGas": self.w3.to_wei("2", "gwei"),
-                        "maxPriorityFeePerGas": self.w3.to_wei("1", "gwei"),
-                    }
-                )
-                signed_tx = self.w3.eth.account.sign_transaction(tx, self.private_key)
-                tx_hash_bytes = self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
-                receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash_bytes, timeout=60)
+    def _transaction_fee_fields(self) -> Dict[str, int]:
+        assert self.w3 is not None
+        latest = self.w3.eth.get_block("latest")
+        if "baseFeePerGas" in latest:
+            return {
+                "maxFeePerGas": self.w3.to_wei("2", "gwei"),
+                "maxPriorityFeePerGas": self.w3.to_wei("1", "gwei"),
+            }
+        return {"gasPrice": self.w3.to_wei("1", "gwei")}
 
-                return {
-                    "success": receipt.status == 1,
-                    "transaction_hash": receipt.transactionHash.hex(),
-                    "block_number": receipt.blockNumber,
-                    "gas_used": receipt.gasUsed,
-                    "submitter": self.account.address,
-                    "stored_hash": hash_hex_standard,
-                    "timestamp": current_time,
-                    "mode": "live_testnet",
-                    "contract_address": self.contract_address,
-                }
-            except Exception as e:
-                # Fallback to local simulation if live tx reverts or network issues
-                pass
+    def _sign_and_send(self, tx: Dict[str, Any]):
+        assert self.w3 is not None
+        signed_tx = self.w3.eth.account.sign_transaction(tx, self.private_key)
+        raw_tx = getattr(signed_tx, "raw_transaction", None) or signed_tx.rawTransaction
+        tx_hash = self.w3.eth.send_raw_transaction(raw_tx)
+        return self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
 
-        # Local simulated EVM execution
-        simulated_tx_hash = "0x" + hashlib.sha256(f"{hash_hex_standard}-{current_time}".encode()).hexdigest()
-        self._local_records[hash_hex_standard] = {
-            "dataHash": hash_hex_standard,
-            "timestamp": current_time,
-            "submitter": self._local_account.address,
-            "tx_hash": simulated_tx_hash,
-            "block_number": 4829100 + len(self._local_records),
+    def deploy_contract(self) -> Dict[str, Any]:
+        """Deploy VerificationRegistry to the configured local EVM."""
+        if not (self.w3 and self.w3.is_connected()):
+            raise BlockchainConfigurationError(
+                f"Anvil RPC is unavailable at {self.rpc_url}. Start it before deploying."
+            )
+        if not self.private_key:
+            raise BlockchainConfigurationError("PRIVATE_KEY is required to deploy the contract.")
+
+        self.account = self.account or self.w3.eth.account.from_key(self.private_key)
+        contract_factory = self.w3.eth.contract(
+            abi=VERIFICATION_REGISTRY_ABI,
+            bytecode=VERIFICATION_REGISTRY_BYTECODE,
+        )
+        nonce = self.w3.eth.get_transaction_count(self.account.address)
+        tx_params = {
+            "from": self.account.address,
+            "nonce": nonce,
+            **self._transaction_fee_fields(),
         }
+        estimated_gas = contract_factory.constructor().estimate_gas({"from": self.account.address})
+        tx_params["gas"] = int(estimated_gas * 1.4)
+        tx = contract_factory.constructor().build_transaction(tx_params)
+        receipt = self._sign_and_send(tx)
+        if receipt.status != 1 or not receipt.contractAddress:
+            raise BlockchainConfigurationError("VerificationRegistry deployment transaction failed.")
+
+        code = self.w3.eth.get_code(receipt.contractAddress)
+        if not code:
+            raise BlockchainConfigurationError("Deployment finished, but no contract bytecode exists at the address.")
+
+        self.contract_address = receipt.contractAddress
+        self.contract = self.w3.eth.contract(
+            address=Web3.to_checksum_address(self.contract_address),
+            abi=VERIFICATION_REGISTRY_ABI,
+        )
+        self.connection_error = None
 
         return {
-            "success": True,
-            "transaction_hash": simulated_tx_hash,
-            "block_number": self._local_records[hash_hex_standard]["block_number"],
-            "gas_used": 47218,
-            "submitter": self._local_account.address,
+            "success": receipt.status == 1,
+            "transaction_hash": self._to_0x_hex(receipt.transactionHash),
+            "block_number": receipt.blockNumber,
+            "gas_used": receipt.gasUsed,
+            "contract_address": self.contract_address,
+            "deployer": self.account.address,
+            "mode": "local_anvil_evm",
+        }
+
+    def store_hash(self, hash_str: str) -> Dict[str, Any]:
+        """Store SHA-256 fingerprint hash on-chain."""
+        self._require_ready()
+        assert self.w3 is not None and self.contract is not None and self.account is not None
+
+        hash_bytes = self._normalize_hash(hash_str)
+        hash_hex_standard = "0x" + hash_bytes.hex()
+        nonce = self.w3.eth.get_transaction_count(self.account.address)
+        tx = self.contract.functions.storeRecord(hash_bytes).build_transaction(
+            {
+                "from": self.account.address,
+                "nonce": nonce,
+                "gas": 180_000,
+                **self._transaction_fee_fields(),
+            }
+        )
+        receipt = self._sign_and_send(tx)
+        record = self.contract.functions.getRecord(hash_bytes).call()
+
+        return {
+            "success": receipt.status == 1,
+            "transaction_hash": self._to_0x_hex(receipt.transactionHash),
+            "block_number": receipt.blockNumber,
+            "gas_used": receipt.gasUsed,
+            "submitter": record[2],
             "stored_hash": hash_hex_standard,
-            "timestamp": current_time,
-            "mode": "local_evm_simulation",
-            "contract_address": self.mock_contract_address,
+            "timestamp": record[1],
+            "mode": "local_anvil_evm",
+            "contract_address": self.contract_address,
         }
 
     def verify_hash(self, hash_str: str) -> Dict[str, Any]:
         """Verify if hash exists on-chain and retrieve details."""
+        self._require_ready()
+        assert self.contract is not None
+
         hash_bytes = self._normalize_hash(hash_str)
         hash_hex_standard = "0x" + hash_bytes.hex()
-
-        if self.is_live and self.contract:
-            try:
-                is_valid = self.contract.functions.verifyRecord(hash_bytes).call()
-                if is_valid:
-                    record = self.contract.functions.getRecord(hash_bytes).call()
-                    return {
-                        "verified": True,
-                        "on_chain_hash": "0x" + record[0].hex(),
-                        "timestamp": record[1],
-                        "submitter": record[2],
-                        "mode": "live_testnet",
-                        "contract_address": self.contract_address,
-                    }
-                return {
-                    "verified": False,
-                    "on_chain_hash": None,
-                    "timestamp": None,
-                    "submitter": None,
-                    "mode": "live_testnet",
-                    "contract_address": self.contract_address,
-                }
-            except Exception:
-                pass
-
-        # Check local EVM storage
-        if hash_hex_standard in self._local_records:
-            record = self._local_records[hash_hex_standard]
+        is_valid = self.contract.functions.verifyRecord(hash_bytes).call()
+        if is_valid:
+            record = self.contract.functions.getRecord(hash_bytes).call()
             return {
                 "verified": True,
-                "on_chain_hash": record["dataHash"],
-                "timestamp": record["timestamp"],
-                "submitter": record["submitter"],
-                "transaction_hash": record["tx_hash"],
-                "block_number": record["block_number"],
-                "mode": "local_evm_simulation",
-                "contract_address": self.mock_contract_address,
+                "on_chain_hash": "0x" + record[0].hex(),
+                "timestamp": record[1],
+                "submitter": record[2],
+                "mode": "local_anvil_evm",
+                "contract_address": self.contract_address,
             }
 
         return {
@@ -182,6 +233,6 @@ class BlockchainVerifier:
             "on_chain_hash": None,
             "timestamp": None,
             "submitter": None,
-            "mode": "local_evm_simulation",
-            "contract_address": self.mock_contract_address,
+            "mode": "local_anvil_evm",
+            "contract_address": self.contract_address,
         }

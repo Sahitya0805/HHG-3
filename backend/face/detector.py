@@ -252,6 +252,7 @@ class FaceDetector:
             "faces_found": num_faces,
             "boxes": boxes,
             "primary_box": [x, y, w, h],
+            "primary_landmarks": primary.get("landmarks", []),
             "confidence": primary["confidence"],
             "confidence_percent": round(primary["confidence"] * 100, 1),
             "primary_face_crop": aligned_crop,
